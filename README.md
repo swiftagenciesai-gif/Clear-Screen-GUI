@@ -206,7 +206,10 @@ scripts/
 ### The COLMAP pipeline (what actually runs)
 
 `colmap_pipeline.py` drives, in order: `feature_extractor` -> matcher
-(`exhaustive_matcher` by default) -> `mapper` (incremental sparse
+(`sequential_matcher` by default, since the capture UI's photos are already
+in turntable rotation order -- this is both faster and more accurate than
+exhaustive pairwise matching, which wastes time on non-overlapping pairs)
+-> `mapper` (incremental sparse
 reconstruction / SfM) -> `image_undistorter` -> `patch_match_stereo` (dense
 depth maps) -> `stereo_fusion` (colored dense point cloud) ->
 `poisson_mesher`. `mesh_export.py` then trims small disconnected debris
