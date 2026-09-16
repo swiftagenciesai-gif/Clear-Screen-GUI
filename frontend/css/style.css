@@ -87,6 +87,8 @@ main {
 .btn.primary { background: linear-gradient(180deg, var(--accent-dim), #0d4552); border-color: var(--accent); color: #fff; }
 .btn.primary:hover:not(:disabled) { background: linear-gradient(180deg, var(--accent), var(--accent-dim)); }
 .btn.danger { border-color: var(--bad); color: var(--bad); background: transparent; }
+.btn.recording { border-color: var(--bad); color: #fff; background: var(--bad); animation: recordPulse 1.2s ease-in-out infinite; }
+@keyframes recordPulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.6; } }
 
 .video-wrap {
   position: relative;

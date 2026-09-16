@@ -231,6 +231,194 @@
     autoTimer = setInterval(captureShot, intervalSec * 1000);
   });
 
+  // ---------- Record-and-extract capture ---------------------------------------
+  // Alternative to clicking a shot every rotation step: record a short video
+  // while turning the object, then pull evenly-spaced frames out of it
+  // afterward. Triggerable by a click or by saying "scan" (voice control is
+  // feature-detected -- most non-Chromium browsers, Safari included as of
+  // this writing, don't implement SpeechRecognition, so it degrades to the
+  // button only rather than silently doing nothing).
+
+  const MAX_RECORD_SECONDS = 45;
+  let mediaRecorder = null;
+  let recordedChunks = [];
+  let recordTimerInterval = null;
+  let recordStartTime = 0;
+
+  function pickRecorderMimeType() {
+    const candidates = [
+      "video/webm;codecs=vp9",
+      "video/webm;codecs=vp8",
+      "video/webm",
+      "video/mp4",
+    ];
+    return candidates.find((t) => window.MediaRecorder && MediaRecorder.isTypeSupported(t)) || "";
+  }
+
+  function isRecording() {
+    return !!mediaRecorder && mediaRecorder.state === "recording";
+  }
+
+  function startRecording() {
+    if (!stream) {
+      $("record-status").textContent = "Enable the camera first (step 1) before recording.";
+      return;
+    }
+    if (isRecording()) return;
+    const mimeType = pickRecorderMimeType();
+    if (!window.MediaRecorder || !mimeType) {
+      $("record-status").textContent = "Video recording isn't supported in this browser -- use Capture Shot / Auto-Capture instead.";
+      return;
+    }
+    recordedChunks = [];
+    mediaRecorder = new MediaRecorder(stream, { mimeType });
+    mediaRecorder.ondataavailable = (e) => {
+      if (e.data && e.data.size > 0) recordedChunks.push(e.data);
+    };
+    mediaRecorder.onstop = () => onRecordingStopped(mimeType);
+    mediaRecorder.start();
+    recordStartTime = performance.now();
+
+    const btn = $("btn-record-toggle");
+    btn.textContent = "⏹ Stop Recording (0s)";
+    btn.classList.add("recording");
+    recordTimerInterval = setInterval(() => {
+      const elapsed = (performance.now() - recordStartTime) / 1000;
+      btn.textContent = `⏹ Stop Recording (${elapsed.toFixed(0)}s)`;
+      if (elapsed >= MAX_RECORD_SECONDS) stopRecording();
+    }, 250);
+    $("record-status").textContent = "Recording -- rotate the object smoothly and evenly, then stop when you've gone all the way around.";
+  }
+
+  function stopRecording() {
+    if (!isRecording()) return;
+    mediaRecorder.stop();
+    clearInterval(recordTimerInterval);
+    const btn = $("btn-record-toggle");
+    btn.textContent = "⏺ Start Recording";
+    btn.classList.remove("recording");
+  }
+
+  async function onRecordingStopped(mimeType) {
+    $("record-status").textContent = "Extracting frames from the recording…";
+    const blob = new Blob(recordedChunks, { type: mimeType });
+    try {
+      const frames = await extractFramesFromVideoBlob(blob, TARGET_SHOTS);
+      for (const canvas of frames) {
+        const sharpness = estimateSharpness(canvas);
+        const frameBlob = await canvasToBlob(canvas);
+        shots.push({ blob: frameBlob, sharpness, blurry: sharpness < BLUR_VARIANCE_THRESHOLD });
+      }
+      renderThumbs();
+      updateStats();
+      $("record-status").textContent = `Pulled ${frames.length} frames from the recording. Review the thumbnails below, then upload.`;
+    } catch (err) {
+      $("record-status").textContent = "Couldn't extract frames from the recording: " + err.message;
+    }
+  }
+
+  // Seeks a hidden <video> element through the recorded blob at evenly
+  // spaced timestamps and grabs a still frame at each one. This runs after
+  // recording stops, not live, so it doesn't compete with the camera preview.
+  function extractFramesFromVideoBlob(blob, targetCount) {
+    return new Promise((resolve, reject) => {
+      const offscreenVideo = document.createElement("video");
+      offscreenVideo.muted = true;
+      offscreenVideo.playsInline = true;
+      offscreenVideo.src = URL.createObjectURL(blob);
+
+      offscreenVideo.onloadedmetadata = async () => {
+        const duration = offscreenVideo.duration;
+        if (!isFinite(duration) || duration <= 0) {
+          reject(new Error("recorded video has no usable duration"));
+          return;
+        }
+        const frames = [];
+        // Trim a small margin off each end -- the first/last few frames are
+        // often where a hand is still moving into/out of frame.
+        const margin = Math.min(0.5, duration * 0.05);
+        const usable = Math.max(0.01, duration - margin * 2);
+        for (let i = 0; i < targetCount; i++) {
+          const t = margin + (usable * i) / Math.max(1, targetCount - 1);
+          await seekTo(offscreenVideo, t);
+          const canvas = document.createElement("canvas");
+          canvas.width = offscreenVideo.videoWidth;
+          canvas.height = offscreenVideo.videoHeight;
+          canvas.getContext("2d").drawImage(offscreenVideo, 0, 0, canvas.width, canvas.height);
+          frames.push(canvas);
+        }
+        URL.revokeObjectURL(offscreenVideo.src);
+        resolve(frames);
+      };
+      offscreenVideo.onerror = () => reject(new Error("failed to load recorded video for frame extraction"));
+    });
+  }
+
+  function seekTo(videoEl, time) {
+    return new Promise((resolve) => {
+      const onSeeked = () => {
+        videoEl.removeEventListener("seeked", onSeeked);
+        resolve();
+      };
+      videoEl.addEventListener("seeked", onSeeked);
+      videoEl.currentTime = time;
+    });
+  }
+
+  $("btn-record-toggle").addEventListener("click", () => {
+    if (isRecording()) stopRecording();
+    else startRecording();
+  });
+
+  // ---------- Voice control ("say 'Scan'") -------------------------------------
+
+  function initVoiceControl() {
+    const SpeechRecognitionImpl = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognitionImpl) {
+      $("voice-status").textContent =
+        "Voice control ('say Scan') isn't supported in this browser (Safari and Firefox generally don't implement it) -- use the button instead.";
+      return;
+    }
+    const recognition = new SpeechRecognitionImpl();
+    recognition.continuous = true;
+    recognition.interimResults = false;
+    recognition.lang = "en-US";
+
+    let deliberatelyStopped = false;
+
+    recognition.onresult = (event) => {
+      const last = event.results[event.results.length - 1];
+      const transcript = last[0].transcript.trim().toLowerCase();
+      if (transcript.includes("scan") && !isRecording()) {
+        startRecording();
+      } else if (transcript.includes("stop") && isRecording()) {
+        stopRecording();
+      }
+    };
+    recognition.onerror = (e) => {
+      $("voice-status").textContent = `Voice control error (${e.error}) -- restarting listener.`;
+    };
+    // Browsers auto-stop continuous recognition after a while; restart it
+    // transparently unless the page itself is being torn down.
+    recognition.onend = () => {
+      if (!deliberatelyStopped) recognition.start();
+    };
+
+    try {
+      recognition.start();
+      $("voice-status").textContent = 'Voice control ready -- say "Scan" to start recording, "Stop" to stop.';
+    } catch (e) {
+      $("voice-status").textContent = "Voice control failed to start: " + e.message;
+    }
+
+    window.addEventListener("beforeunload", () => {
+      deliberatelyStopped = true;
+      recognition.stop();
+    });
+  }
+
+  initVoiceControl();
+
   // ---------- Upload + processing ---------------------------------------------
 
   async function apiUploadFile(url, blob, filename) {

@@ -131,19 +131,29 @@ def run_colmap_pipeline(
 
     # --- 1. Feature extraction --------------------------------------------------
     on_progress("feature_extraction", 0.0, "Detecting SIFT features in each photo...")
+    gpu_requested = os.environ.get("COLMAP_GPU", "0") == "1"
     cmd = [
         colmap_binary(), "feature_extractor",
         "--database_path", str(db_path),
         "--image_path", str(images_dir),
         "--ImageReader.camera_model", camera_model,
         "--ImageReader.single_camera", "1" if single_camera else "0",
+        "--SiftExtraction.max_num_features", "16384",
     ]
-    # Only pass GPU flags when explicitly requested. Some COLMAP builds
-    # (notably the Homebrew bottle on macOS, which has no CUDA available)
-    # are compiled without GPU support at all and reject these options
-    # outright with "unrecognised option", rather than just ignoring them.
-    if os.environ.get("COLMAP_GPU", "0") == "1":
+    if gpu_requested:
+        # Only pass GPU flags when explicitly requested. Some COLMAP builds
+        # (notably the Homebrew bottle on macOS, which has no CUDA
+        # available) are compiled without GPU support at all and reject
+        # these options outright with "unrecognised option", rather than
+        # just ignoring them.
         cmd += ["--SiftExtraction.use_gpu", "1"]
+    else:
+        # Affine-shape estimation and domain-size pooling are CPU-only
+        # (COLMAP's GPU SiftGPU path doesn't support them) but meaningfully
+        # more robust on texture-poor, curved objects (mugs, bottles) --
+        # exactly the worst case for SfM. Worth the extra time since the
+        # CPU sparse-mesh fallback path lives or dies on point count/quality.
+        cmd += ["--SiftExtraction.estimate_affine_shape", "1", "--SiftExtraction.domain_size_pooling", "1"]
     if has_masks:
         cmd += ["--ImageReader.mask_path", str(masks_dir)]
 
@@ -164,8 +174,9 @@ def run_colmap_pipeline(
     cmd = [
         colmap_binary(), matcher_cmd_name,
         "--database_path", str(db_path),
+        "--SiftMatching.guided_matching", "1",  # re-matches using the estimated geometry -> more, cleaner matches
     ]
-    if os.environ.get("COLMAP_GPU", "0") == "1":
+    if gpu_requested:
         cmd += ["--SiftMatching.use_gpu", "1"]
 
     def _match_line(line: str):
@@ -340,13 +351,20 @@ def _mesh_from_sparse_cpu(best_model: Path, colmap_dir: Path, log_fn: Callable[[
     )
     pcd.orient_normals_consistent_tangent_plane(k=15)
 
-    mesh, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(pcd, depth=8)
+    mesh, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
+        pcd,
+        depth=8,
+        scale=1.05,  # default 1.1 extrapolates further past the point cloud's own bounds; tighten it
+        linear_fit=True,  # hews closer to the actual sparse points instead of maximally smoothing between them
+    )
     densities = np.asarray(densities)
     # Poisson reconstruction extrapolates a closed surface into empty space
     # away from the (sparse) points it was given, which without trimming
     # produces a bloated, ill-defined blob well beyond the actual object.
-    # Keep only the best-supported 90% of the surface.
-    mesh.remove_vertices_by_mask(densities < np.quantile(densities, 0.1))
+    # Keep only the best-supported 85% of the surface -- more aggressive
+    # than a typical dense-cloud trim since there's so much less real data
+    # backing each vertex here.
+    mesh.remove_vertices_by_mask(densities < np.quantile(densities, 0.15))
 
     out_path = colmap_dir / "meshed-sparse.ply"
     o3d.io.write_triangle_mesh(str(out_path), mesh)
