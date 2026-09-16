@@ -139,12 +139,6 @@ def run_colmap_pipeline(
         "--ImageReader.camera_model", camera_model,
         "--ImageReader.single_camera", "1" if single_camera else "0",
         "--SiftExtraction.max_num_features", "16384",
-        # The capture UI requests ~1920x1080 photos, and per-pixel detail
-        # beyond this doesn't help sparse feature matching (it only pays off
-        # for dense stereo, which the CPU-only path doesn't run at all) --
-        # downsampling first cuts a real chunk of feature-extraction and
-        # matching time for free.
-        "--SiftExtraction.max_image_size", "1600",
     ]
     if gpu_requested:
         # Only pass GPU flags when explicitly requested. Some COLMAP builds
