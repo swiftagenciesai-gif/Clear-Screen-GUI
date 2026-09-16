@@ -62,6 +62,11 @@
   }
 
   $("btn-start-cam").addEventListener("click", async () => {
+    // Speech recognition has to be started from inside a real user click,
+    // not on page load -- browsers treat it like any other mic-permission
+    // API and reject an unsolicited start with a "not-allowed" error, so
+    // this piggybacks on the same click as enabling the camera.
+    initVoiceControl();
     try {
       await startCamera(null);
       $("btn-start-cam").textContent = "Camera Active";
@@ -328,7 +333,15 @@
       offscreenVideo.src = URL.createObjectURL(blob);
 
       offscreenVideo.onloadedmetadata = async () => {
-        const duration = offscreenVideo.duration;
+        let duration = offscreenVideo.duration;
+        if (!isFinite(duration) || duration <= 0) {
+          // MediaRecorder blobs commonly report duration as Infinity/NaN
+          // until the browser has actually scanned the whole stream --
+          // seeking near the end forces that scan and fixes it up. This is
+          // a known quirk of MediaRecorder-produced media, not a bug in the
+          // recording itself.
+          duration = await fixInfiniteDuration(offscreenVideo);
+        }
         if (!isFinite(duration) || duration <= 0) {
           reject(new Error("recorded video has no usable duration"));
           return;
@@ -354,6 +367,19 @@
     });
   }
 
+  function fixInfiniteDuration(videoEl) {
+    return new Promise((resolve) => {
+      const onTimeUpdate = () => {
+        videoEl.removeEventListener("timeupdate", onTimeUpdate);
+        const fixed = videoEl.duration;
+        videoEl.currentTime = 0;
+        resolve(fixed);
+      };
+      videoEl.addEventListener("timeupdate", onTimeUpdate);
+      videoEl.currentTime = 1e10; // seeking past the end forces a real duration to be computed
+    });
+  }
+
   function seekTo(videoEl, time) {
     return new Promise((resolve) => {
       const onSeeked = () => {
@@ -372,7 +398,18 @@
 
   // ---------- Voice control ("say 'Scan'") -------------------------------------
 
+  // Errors that mean "the browser/user refused permission" -- retrying
+  // immediately just reproduces the same error forever, so these stop the
+  // listener instead of restarting it. Everything else (no-speech timeouts,
+  // transient network hiccups) is worth auto-restarting.
+  const VOICE_FATAL_ERRORS = new Set(["not-allowed", "service-not-allowed"]);
+
+  let voiceControlStarted = false;
+
   function initVoiceControl() {
+    if (voiceControlStarted) return; // guard against the click handler firing more than once
+    voiceControlStarted = true;
+
     const SpeechRecognitionImpl = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SpeechRecognitionImpl) {
       $("voice-status").textContent =
@@ -396,10 +433,17 @@
       }
     };
     recognition.onerror = (e) => {
-      $("voice-status").textContent = `Voice control error (${e.error}) -- restarting listener.`;
+      if (VOICE_FATAL_ERRORS.has(e.error)) {
+        deliberatelyStopped = true;
+        $("voice-status").textContent =
+          `Voice control was denied microphone access (${e.error}). Check Safari's site permissions for ` +
+          "this page (or System Settings > Privacy & Security > Microphone) and reload -- use the button meanwhile.";
+      } else {
+        $("voice-status").textContent = `Voice control hiccup (${e.error}) -- still listening.`;
+      }
     };
     // Browsers auto-stop continuous recognition after a while; restart it
-    // transparently unless the page itself is being torn down.
+    // transparently unless it failed for a reason retrying won't fix.
     recognition.onend = () => {
       if (!deliberatelyStopped) recognition.start();
     };
@@ -416,8 +460,6 @@
       recognition.stop();
     });
   }
-
-  initVoiceControl();
 
   // ---------- Upload + processing ---------------------------------------------
 
