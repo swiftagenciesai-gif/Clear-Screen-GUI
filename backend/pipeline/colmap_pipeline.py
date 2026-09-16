@@ -206,6 +206,30 @@ def run_colmap_pipeline(
     best_model = model_dirs[0]
     on_progress("sparse_reconstruction", 1.0, f"Sparse model reconstructed ({best_model.name}).")
 
+    gpu_available = os.environ.get("COLMAP_GPU", "0") == "1"
+
+    if not gpu_available:
+        # COLMAP's dense multi-view stereo (patch_match_stereo) has no CPU
+        # code path at all -- it hard-requires an NVIDIA CUDA GPU, which no
+        # Mac has and most laptops don't either. Rather than run the
+        # undistortion step just to fail on the GPU-only step right after
+        # it, skip straight to a CPU-only mesh built directly from the
+        # sparse point cloud (see _mesh_from_sparse_cpu). It's lower detail
+        # than real dense MVS, but it's a genuine reconstruction from your
+        # photos and needs no additional installs (Meshroom is not a viable
+        # substitute here either -- AliceVision does not publish official
+        # macOS builds of it at all).
+        for skipped_step in ("undistortion", "dense_stereo", "stereo_fusion"):
+            on_progress(
+                skipped_step, 1.0,
+                "Skipped: no CUDA GPU available (set COLMAP_GPU=1 if you have one). "
+                "Meshing directly from the sparse point cloud instead.",
+            )
+        on_progress("meshing", 0.1, "Estimating normals and running CPU Poisson reconstruction on sparse points...")
+        meshed_path = _mesh_from_sparse_cpu(best_model, colmap_dir, log_fn)
+        on_progress("meshing", 1.0, "CPU mesh reconstructed from sparse point cloud.")
+        return meshed_path
+
     # --- 4. Undistortion (prepares images for dense MVS) -------------------------
     on_progress("undistortion", 0.1, "Undistorting images for dense stereo...")
     cmd = [
@@ -226,9 +250,8 @@ def run_colmap_pipeline(
         "--workspace_path", str(dense_dir),
         "--workspace_format", "COLMAP",
         "--PatchMatchStereo.geom_consistency", "true",
+        "--PatchMatchStereo.gpu_index", "0",
     ]
-    if os.environ.get("COLMAP_GPU", "0") == "1":
-        cmd += ["--PatchMatchStereo.gpu_index", "0"]
 
     depth_re = re.compile(r"Processing view (\d+)\s*/\s*(\d+)")
 
@@ -239,18 +262,7 @@ def run_colmap_pipeline(
             if n:
                 on_progress("dense_stereo", i / n, f"Depth map {i}/{n}...")
 
-    try:
-        _run_streaming(cmd, colmap_dir, _pms_line, log_fn, timeout=7200)
-    except ColmapError as e:
-        raise ColmapError(
-            "patch_match_stereo failed. COLMAP's dense reconstruction step requires "
-            "an NVIDIA CUDA GPU -- it will not run on a CPU-only build (this is "
-            "COLMAP's own limitation, common on macOS/Homebrew installs and any "
-            "machine without an NVIDIA GPU, not a bug in this app). If you don't "
-            "have a CUDA GPU, install Meshroom instead (it has a real CPU dense "
-            "reconstruction path) and re-run with the 'Force Meshroom' engine "
-            f"option. Original error: {e}"
-        ) from e
+    _run_streaming(cmd, colmap_dir, _pms_line, log_fn, timeout=7200)
     on_progress("dense_stereo", 1.0, "Dense stereo complete.")
 
     # --- 6. Stereo fusion into a colored point cloud -----------------------------
@@ -282,3 +294,60 @@ def run_colmap_pipeline(
     on_progress("meshing", 1.0, "Mesh reconstructed.")
 
     return meshed_path
+
+
+def _mesh_from_sparse_cpu(best_model: Path, colmap_dir: Path, log_fn: Callable[[str], None] | None) -> Path:
+    """CPU-only fallback mesh: exports COLMAP's sparse point cloud (from the
+    incremental SfM step, which never needs a GPU) and runs Poisson surface
+    reconstruction on it via Open3D -- also pure CPU. No dense multi-view
+    stereo, so far fewer points to work with than the GPU path (thousands
+    instead of millions), which means a visibly blobbier, lower-detail
+    result -- but it's a real reconstruction of your photos' 3D geometry,
+    not a placeholder shape.
+    """
+    import numpy as np
+    import open3d as o3d
+
+    sparse_ply = colmap_dir / "sparse_points.ply"
+    cmd = [
+        colmap_binary(), "model_converter",
+        "--input_path", str(best_model),
+        "--output_path", str(sparse_ply),
+        "--output_type", "PLY",
+    ]
+    _run_streaming(cmd, colmap_dir, lambda l: None, log_fn)
+
+    pcd = o3d.io.read_point_cloud(str(sparse_ply))
+    if len(pcd.points) < 50:
+        raise ColmapError(
+            f"Only {len(pcd.points)} sparse 3D points were reconstructed -- far too "
+            "few to mesh into anything recognizable. This means most of your photos "
+            "never matched into the model (look for repeated 'Could not register' "
+            "lines in the log above from the sparse_reconstruction step). This is "
+            "almost always caused by too little real camera/object movement between "
+            "shots -- retake the turntable set making sure you genuinely rotate the "
+            "object a small amount before every single capture, with good overlap "
+            "between consecutive views."
+        )
+
+    # Normal estimation/orientation is scale-sensitive, and COLMAP's SfM
+    # output is in an arbitrary, unknown scale -- so derive the search
+    # radius from the point cloud's own bounding box instead of a fixed
+    # number.
+    diag = float(np.linalg.norm(pcd.get_max_bound() - pcd.get_min_bound())) or 1.0
+    pcd.estimate_normals(
+        search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=diag * 0.02, max_nn=30)
+    )
+    pcd.orient_normals_consistent_tangent_plane(k=15)
+
+    mesh, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(pcd, depth=8)
+    densities = np.asarray(densities)
+    # Poisson reconstruction extrapolates a closed surface into empty space
+    # away from the (sparse) points it was given, which without trimming
+    # produces a bloated, ill-defined blob well beyond the actual object.
+    # Keep only the best-supported 90% of the surface.
+    mesh.remove_vertices_by_mask(densities < np.quantile(densities, 0.1))
+
+    out_path = colmap_dir / "meshed-sparse.ply"
+    o3d.io.write_triangle_mesh(str(out_path), mesh)
+    return out_path

@@ -22,9 +22,11 @@ and the viewer.
 
 - Python 3.10+
 - A webcam
-- **COLMAP** (recommended engine) or **Meshroom** (fallback engine) --
-  see below, neither ships with this repo since both are large, compiled,
-  platform-specific tools.
+- **COLMAP** -- see below, doesn't ship with this repo since it's a large,
+  compiled, platform-specific tool. (Meshroom exists as an alternative
+  engine in the code, but has no official macOS build at all -- see the
+  note under "Install a photogrammetry engine" below. On macOS, COLMAP is
+  your only real option.)
 - Internet access the first time you open the viewer page, to fetch
   three.js and MediaPipe Hands from a CDN (see "Offline / CDN-blocked
   networks" below if that's not available on your network).
@@ -75,13 +77,21 @@ Verify:
 colmap -h   # should print COLMAP's version and command list
 ```
 
-**Meshroom (fallback)** -- only needed if COLMAP won't build or run on your
-machine. Prebuilt, no compiling:
+**Meshroom (fallback, Linux/Windows only)** -- AliceVision does not publish
+an official macOS build, so this isn't a real option on a Mac (building it
+from source yourself is possible but a significant undertaking, well
+outside "download a binary"). On Linux or Windows, prebuilt and no
+compiling:
 
 ```
 https://alicevision.org/#meshroom  ->  download, unzip, add the folder
 containing `meshroom_batch` to your PATH.
 ```
+
+On macOS without a CUDA GPU (i.e. every Mac), just use COLMAP -- this app
+automatically falls back to a CPU-only sparse-point-cloud mesh when dense
+stereo isn't available (see "Real limitations" below for what that means
+for quality).
 
 Re-run `python3 scripts/check_deps.py` until it reports everything ready.
 
@@ -262,14 +272,35 @@ three.js code. That's the whole extension point.
 
 ## Real limitations (read before you scan something)
 
-**Processing time.** A 30-50 photo scan through the full COLMAP pipeline
-(feature extraction -> matching -> SfM -> dense stereo -> meshing) commonly
-takes **5-30+ minutes on CPU**, depending on photo resolution, count, and
-your machine. Dense stereo (`patch_match_stereo`) is the slowest step by
-far. COLMAP can use a CUDA GPU for a large speedup on that step, but this
-app runs COLMAP in CPU-only mode by default. Set `COLMAP_GPU=1` before
-starting the backend if you have a working CUDA + COLMAP-with-CUDA build.
-There is no way around this being slow -- real multi-view stereo is
+**Dense stereo requires an NVIDIA CUDA GPU -- there is no CPU version, at
+all.** This is COLMAP's own limitation (and it's not alone: AliceVision's
+Meshroom needs one too, and doesn't even ship an official macOS build in
+the first place -- building it from source is its own project). Concretely:
+- **No Mac has one.** Apple dropped NVIDIA support years ago, so this
+  applies to every Mac, Apple Silicon or Intel, with or without an eGPU.
+- **Most Windows/Linux laptops don't either** unless they specifically have
+  a discrete NVIDIA GPU (integrated Intel/AMD graphics don't count, and
+  neither do AMD discrete GPUs -- CUDA is NVIDIA-only).
+- If you *do* have a working CUDA-enabled COLMAP build, set `COLMAP_GPU=1`
+  before starting the backend to use it and get real dense multi-view
+  stereo (millions of points, fine surface detail).
+- **Without that**, this app automatically falls back to building the mesh
+  directly from COLMAP's *sparse* point cloud (Poisson surface
+  reconstruction via Open3D, entirely CPU-based, no extra installs). This
+  is a real reconstruction from your photos, but a much rougher one --
+  typically hundreds to a few thousand points instead of millions, so
+  expect a blobby overall shape that captures the object's rough form, not
+  fine surface texture or detail. There is no way to get COLMAP- or
+  Meshroom-quality dense detail without a CUDA GPU; a cloud GPU instance or
+  a paid hosted photogrammetry API are the only ways around that, and
+  neither is set up here.
+
+**Processing time.** Even the CPU sparse-fallback path completes in
+seconds to a couple minutes. The full CUDA dense pipeline (feature
+extraction -> matching -> SfM -> dense stereo -> meshing) on a 30-50 photo
+scan commonly takes **5-30+ minutes**, with dense stereo
+(`patch_match_stereo`) as the slowest step by far. There is no way around
+that being slow when it does run -- real multi-view stereo is
 computationally heavy, and the progress UI is there so it's honest about
 that rather than making it look broken.
 
@@ -343,13 +374,25 @@ rather than a blank page. To run fully offline:
 
 ## Troubleshooting
 
-- **`COLMAP could not reconstruct a sparse model from these photos.`**
-  Too little overlap, too few images, or a bad subject for photogrammetry
-  (see Limitations above). Retake with more images, more even lighting, and
-  a more textured/less reflective object.
+- **`COLMAP could not reconstruct a sparse model from these photos.`** or
+  **only a handful of your photos show up as "Registered" / most log lines
+  say `Could not register, trying another image`** -- almost always means
+  consecutive photos didn't actually change viewpoint enough for COLMAP to
+  triangulate anything. This happens if you click "Capture Shot" repeatedly
+  without genuinely rotating the object a real, visible amount between each
+  shot (rotating it in your head doesn't count -- the object itself has to
+  visibly turn in the frame). Retake the set making sure each shot is a
+  distinct ~10-degree turn from the last, with good overlap between
+  consecutive views, more even lighting, and a more textured/less
+  reflective object.
 - **`colmap: command not found`** -- run `python3 scripts/check_deps.py` and
   follow its instructions, or `bash scripts/install_colmap.sh` on
   Ubuntu/Debian.
+- **`Dense stereo reconstruction requires CUDA, which is not available on
+  your system.`** -- expected on any machine without an NVIDIA GPU
+  (including every Mac). Not an error to fix -- the app automatically uses
+  the CPU sparse-mesh fallback instead once you retry. See "Real
+  limitations" above for what that means for output quality.
 - **Stuck at "dense_stereo" for a very long time** -- this is genuinely the
   slowest step; check the live log tail in the capture page to confirm it's
   still emitting `Processing view i/n` lines rather than actually stuck.
