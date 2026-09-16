@@ -55,8 +55,17 @@
     <p class="hint">
       Place the object back in frame. After each shot, rotate it a small, even amount
       (~<span id="deg-per-shot">10</span>&deg;) and capture again, working all the way
-      around a full 360&deg; turn. Keep the camera distance and height constant. Aim for
-      <span id="target-shots-label">36</span> shots minimum; more is better for fine detail.
+      around a full 360&deg; turn. Aim for <span id="target-shots-label">36</span> shots
+      minimum; more is better for fine detail.
+    </p>
+    <p class="hint" style="color: var(--warn);">
+      <strong>Important:</strong> don't keep the camera at one fixed height/angle the whole
+      way around &mdash; a pure flat turntable spin is a classic weak case for 3D
+      reconstruction and tends to produce a flattened, "2D-looking" result. Instead, vary
+      the camera's height or tilt as you go: capture roughly a third of your shots angled
+      slightly down from above, a third level with the object, and a third angled slightly
+      up from below. That real viewpoint variation is what gives the reconstruction actual
+      depth to work with.
     </p>
 
     <div class="stats-row">

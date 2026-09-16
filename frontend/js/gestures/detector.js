@@ -4,6 +4,7 @@
 // This is the only file that knows MediaPipe's API shape -- everything else
 // in gestures/ works against the small, stable FrameContext contract below.
 import { RollingHistory } from "./default-gestures.js";
+import { HandLandmarkSmoother } from "./smoothing.js";
 
 /**
  * @typedef FrameContext
@@ -23,6 +24,11 @@ export class GestureDetectorSystem {
     this._busy = false;
     this._lastFrameTime = performance.now();
     this._hands = null;
+    // beta > 0 is the key knob: it lets fast motion cut through the smoothing
+    // (so a real swipe/pan doesn't feel laggy) while a resting hand still
+    // gets heavily smoothed (so gestures like pinch/fist don't flicker from
+    // camera noise alone).
+    this._smoother = new HandLandmarkSmoother({ minCutoff: 0.8, beta: 0.4, dCutoff: 1.0 });
   }
 
   async init() {
@@ -54,10 +60,11 @@ export class GestureDetectorSystem {
     // (gesture detectors, rolling history, skeleton drawing, marker
     // placement) works in the same coordinate space as the CSS-mirrored
     // <video> element the user actually sees themselves in.
-    const hands = (results.multiHandLandmarks || []).map((landmarks, i) => ({
+    const rawHands = (results.multiHandLandmarks || []).map((landmarks, i) => ({
       landmarks: this.mirror ? landmarks.map((p) => ({ x: 1 - p.x, y: p.y, z: p.z })) : landmarks,
       handedness: results.multiHandedness?.[i]?.label || "Unknown",
     }));
+    const hands = this._smoother.smooth(rawHands, now);
 
     this.history.push(hands);
     this.onHandsStatus(hands.length > 0 ? "tracking" : "no-hands");

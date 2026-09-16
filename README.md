@@ -322,8 +322,21 @@ Concretely:
 - Textured object surfaces reconstruct much better than flat, uniformly
   colored ones (SfM literally cannot triangulate points it can't uniquely
   identify across photos).
-- Keep the camera-to-object distance and camera height constant if capturing
-  by hand; wobble that changes framing between shots isn't fatal but hurts.
+- Keep the camera-to-object distance roughly steady if capturing by hand;
+  large swings in framing between shots hurt, but see the very next point --
+  height/tilt is the one thing you deliberately *should* vary.
+
+**A flat, single-height turntable spin produces a flattened, "2D-looking"
+result -- this is expected, not a bug.** Rotating an object on a turntable
+while the camera stays at one fixed height/angle for the whole 360 degrees
+is a classic degenerate case for structure-from-motion: that motion pattern
+gives the solver very weak depth cues, especially combined with a webcam's
+unknown intrinsics (no real focal length/distortion calibration, just an
+initial guess COLMAP refines as it goes). The fix is capture technique, not
+a setting: vary the camera's height or tilt across the sequence -- roughly a
+third of shots angled down from above, a third level, a third angled up from
+below -- rather than one perfectly flat sweep. That's the difference between
+a recognizable 3D shape and a flat blob from the exact same object.
 
 **The coverage ring is a capture-count guide, not real angle estimation.**
 It assumes each shot is one even rotation step of a full 360-degree turn; it
