@@ -174,7 +174,6 @@ def run_colmap_pipeline(
     cmd = [
         colmap_binary(), matcher_cmd_name,
         "--database_path", str(db_path),
-        "--SiftMatching.guided_matching", "1",  # re-matches using the estimated geometry -> more, cleaner matches
     ]
     if gpu_requested:
         cmd += ["--SiftMatching.use_gpu", "1"]
