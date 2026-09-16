@@ -222,18 +222,48 @@
     }
   });
 
-  let autoCountdown = null;
+  // Auto-capture used to fire on a bare interval with zero warning, so
+  // there was no way to see what was actually about to be photographed.
+  // This drives a live countdown instead: the overlay always shows time
+  // remaining until the next shot, so the current framing is visible right
+  // up to (and through) the moment it's captured.
+  const countdownEl = $("countdown-overlay");
+  let nextCaptureAt = 0;
+  let lastWholeSecond = -1;
+
+  function updateCountdownOverlay() {
+    const remainingMs = Math.max(0, nextCaptureAt - performance.now());
+    const remainingSec = remainingMs / 1000;
+    const wholeSecond = Math.ceil(remainingSec);
+    if (wholeSecond !== lastWholeSecond) {
+      lastWholeSecond = wholeSecond;
+      countdownEl.classList.add("tick");
+      setTimeout(() => countdownEl.classList.remove("tick"), 120);
+    }
+    countdownEl.innerHTML = `\u{1F4F7} next shot in <span class="num">${remainingSec.toFixed(1)}</span>s`;
+  }
+
   $("btn-auto-toggle").addEventListener("click", () => {
     if (autoTimer) {
       clearInterval(autoTimer);
-      clearInterval(autoCountdown);
       autoTimer = null;
+      countdownEl.style.display = "none";
       $("btn-auto-toggle").textContent = "Start Auto-Capture";
       return;
     }
     const intervalSec = parseFloat($("auto-interval").value) || 2;
     $("btn-auto-toggle").textContent = `Auto-capturing (every ${intervalSec}s) - click to stop`;
-    autoTimer = setInterval(captureShot, intervalSec * 1000);
+    countdownEl.style.display = "flex";
+    nextCaptureAt = performance.now() + intervalSec * 1000;
+    lastWholeSecond = -1;
+    autoTimer = setInterval(() => {
+      updateCountdownOverlay();
+      if (performance.now() >= nextCaptureAt) {
+        captureShot();
+        nextCaptureAt = performance.now() + intervalSec * 1000;
+        lastWholeSecond = -1;
+      }
+    }, 100);
   });
 
   // ---------- Record-and-extract capture ---------------------------------------

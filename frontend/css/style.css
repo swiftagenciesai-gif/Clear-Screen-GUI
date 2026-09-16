@@ -104,6 +104,31 @@ main {
   width: 100%;
   display: block;
 }
+.countdown-overlay {
+  position: absolute;
+  top: 12px; right: 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  border-radius: 30px;
+  background: rgba(5, 7, 12, 0.75);
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  font-size: 15px;
+  font-weight: 600;
+  pointer-events: none;
+  transition: transform 0.1s ease;
+}
+.countdown-overlay.tick {
+  transform: scale(1.08);
+}
+.countdown-overlay .num {
+  font-size: 22px;
+  font-variant-numeric: tabular-nums;
+  min-width: 1.2em;
+  text-align: center;
+}
 .video-wrap canvas.overlay {
   position: absolute;
   top: 0; left: 0;
