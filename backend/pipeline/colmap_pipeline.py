@@ -137,8 +137,13 @@ def run_colmap_pipeline(
         "--image_path", str(images_dir),
         "--ImageReader.camera_model", camera_model,
         "--ImageReader.single_camera", "1" if single_camera else "0",
-        "--SiftExtraction.use_gpu", "1" if os.environ.get("COLMAP_GPU", "0") == "1" else "0",
     ]
+    # Only pass GPU flags when explicitly requested. Some COLMAP builds
+    # (notably the Homebrew bottle on macOS, which has no CUDA available)
+    # are compiled without GPU support at all and reject these options
+    # outright with "unrecognised option", rather than just ignoring them.
+    if os.environ.get("COLMAP_GPU", "0") == "1":
+        cmd += ["--SiftExtraction.use_gpu", "1"]
     if has_masks:
         cmd += ["--ImageReader.mask_path", str(masks_dir)]
 
@@ -159,8 +164,9 @@ def run_colmap_pipeline(
     cmd = [
         colmap_binary(), matcher_cmd_name,
         "--database_path", str(db_path),
-        "--SiftMatching.use_gpu", "1" if os.environ.get("COLMAP_GPU", "0") == "1" else "0",
     ]
+    if os.environ.get("COLMAP_GPU", "0") == "1":
+        cmd += ["--SiftMatching.use_gpu", "1"]
 
     def _match_line(line: str):
         frac = _parse_fraction(line)
@@ -220,8 +226,9 @@ def run_colmap_pipeline(
         "--workspace_path", str(dense_dir),
         "--workspace_format", "COLMAP",
         "--PatchMatchStereo.geom_consistency", "true",
-        "--PatchMatchStereo.gpu_index", "-1" if os.environ.get("COLMAP_GPU", "0") != "1" else "0",
     ]
+    if os.environ.get("COLMAP_GPU", "0") == "1":
+        cmd += ["--PatchMatchStereo.gpu_index", "0"]
 
     depth_re = re.compile(r"Processing view (\d+)\s*/\s*(\d+)")
 
@@ -232,7 +239,18 @@ def run_colmap_pipeline(
             if n:
                 on_progress("dense_stereo", i / n, f"Depth map {i}/{n}...")
 
-    _run_streaming(cmd, colmap_dir, _pms_line, log_fn, timeout=7200)
+    try:
+        _run_streaming(cmd, colmap_dir, _pms_line, log_fn, timeout=7200)
+    except ColmapError as e:
+        raise ColmapError(
+            "patch_match_stereo failed. COLMAP's dense reconstruction step requires "
+            "an NVIDIA CUDA GPU -- it will not run on a CPU-only build (this is "
+            "COLMAP's own limitation, common on macOS/Homebrew installs and any "
+            "machine without an NVIDIA GPU, not a bug in this app). If you don't "
+            "have a CUDA GPU, install Meshroom instead (it has a real CPU dense "
+            "reconstruction path) and re-run with the 'Force Meshroom' engine "
+            f"option. Original error: {e}"
+        ) from e
     on_progress("dense_stereo", 1.0, "Dense stereo complete.")
 
     # --- 6. Stereo fusion into a colored point cloud -----------------------------
