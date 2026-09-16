@@ -13,7 +13,9 @@ const VERTEX_SHADER = /* glsl */ `
 
   void main() {
     #ifdef USE_COLOR
-      vColor = color;
+      // three.js injects the built-in color attribute as vec4 (RGBA) --
+      // take just the RGB channels since vColor only needs to feed a tint mix.
+      vColor = color.rgb;
     #else
       vColor = vec3(1.0);
     #endif
