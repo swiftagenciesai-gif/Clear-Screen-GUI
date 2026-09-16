@@ -242,3 +242,16 @@ main {
 }
 .step-pill.active { border-color: var(--accent); color: var(--accent); }
 .step-pill.done { border-color: var(--good); color: var(--good); }
+
+@media (max-width: 700px) {
+  header.topbar { padding: 10px 14px; }
+  header.topbar h1 { font-size: 13px; }
+  header.topbar nav a { margin-left: 10px; font-size: 12px; }
+  main { padding: 12px; }
+  .panel { padding: 14px; }
+  .stats-row { gap: 16px; flex-wrap: wrap; }
+  .controls-row { gap: 8px; }
+  .btn { padding: 10px 14px; font-size: 13px; }
+  .countdown-overlay { top: 8px; right: 8px; padding: 6px 12px; font-size: 12px; }
+  .countdown-overlay .num { font-size: 16px; }
+}

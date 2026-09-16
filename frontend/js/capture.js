@@ -1,6 +1,8 @@
 // Turntable capture UI: webcam access, background plate step, guided
 // multi-shot capture with a coverage ring + blur warnings, then upload and
 // kick off backend reconstruction with live progress polling.
+import { GestureDetectorSystem } from "./gestures/detector.js";
+
 (() => {
   "use strict";
 
@@ -35,6 +37,8 @@
   let scanId = null;
   let pollTimer = null;
   let lastOutlineHull = null; // grid-space convex hull points from the most recent frame, or null
+  let latestHandLandmarks = []; // most recent frame's hands, each a 21-point landmark array in raw (unmirrored) video-normalized coords
+  let handDetectorStarted = false;
 
   // ---------- Camera setup ----------------------------------------------------
 
@@ -57,6 +61,10 @@
     const constraints = {
       video: {
         deviceId: deviceId ? { exact: deviceId } : undefined,
+        // Scanning a physical object means the *rear* camera on a phone --
+        // only used as a hint (not "exact") so it's harmless on laptops with
+        // a single front-facing webcam.
+        facingMode: deviceId ? undefined : { ideal: "environment" },
         width: { ideal: 1920 },
         height: { ideal: 1080 },
       },
@@ -67,6 +75,7 @@
     await new Promise((res) => (video.onloadedmetadata = res));
     overlay.width = video.videoWidth;
     overlay.height = video.videoHeight;
+    startHandMaskingIfNeeded();
     await listCameras();
     $("bg-panel").style.display = "block";
   }
@@ -214,6 +223,52 @@
     return lower.concat(upper);
   }
 
+  // Starts live hand tracking (reusing the same MediaPipe wrapper the
+  // gesture viewer uses) purely so the outline detector can tell "your hand"
+  // apart from "the thing in your hand" -- without this, a hand touching the
+  // object just merges into one big blob, and the loudest/largest connected
+  // shape is often more hand+arm than object. If MediaPipe fails to load
+  // (e.g. no internet for the CDN script), the outline falls back to plain
+  // largest-blob detection rather than breaking capture entirely.
+  function startHandMaskingIfNeeded() {
+    if (handDetectorStarted) return;
+    handDetectorStarted = true;
+    const handDetector = new GestureDetectorSystem(video, {
+      mirror: false, // this page's video isn't CSS-mirrored, so raw MediaPipe coords already match the overlay canvas
+      onResults: (ctx) => {
+        latestHandLandmarks = ctx.hands.map((h) => h.landmarks);
+      },
+      onHandsStatus: () => {},
+    });
+    handDetector
+      .init()
+      .then(() => handDetector.start())
+      .catch((e) => {
+        console.warn("Hand detection unavailable, outline will use largest-blob only:", e.message);
+      });
+  }
+
+  // Zeroes out a small disk around every hand landmark so the hand's own
+  // silhouette doesn't get counted as part of "the object" -- a rough
+  // approximation (21 points per hand, not a pixel-perfect hand mask), but
+  // enough to disconnect a held object from the arm holding it.
+  function excludeHandsFromMask(mask, gw, gh) {
+    const radius = Math.round(gw * 0.045); // ~5px on a 120-wide grid
+    for (const landmarks of latestHandLandmarks) {
+      for (const p of landmarks) {
+        const cx = Math.round(p.x * gw);
+        const cy = Math.round(p.y * gh);
+        for (let dy = -radius; dy <= radius; dy++) {
+          for (let dx = -radius; dx <= radius; dx++) {
+            if (dx * dx + dy * dy > radius * radius) continue;
+            const x = cx + dx, y = cy + dy;
+            if (x >= 0 && y >= 0 && x < gw && y < gh) mask[y * gw + x] = 0;
+          }
+        }
+      }
+    }
+  }
+
   // Recomputes the live outline from the current video frame. Cheap enough
   // (a 120x68 grid) to call every animation frame.
   function updateObjectOutline() {
@@ -226,6 +281,10 @@
     for (let i = 0; i < mask.length; i++) {
       mask[i] = Math.abs(currentGray[i] - backgroundGrayGrid[i]) > OUTLINE_DIFF_THRESHOLD ? 1 : 0;
     }
+    if (latestHandLandmarks.length) excludeHandsFromMask(mask, OUTLINE_GRID_W, OUTLINE_GRID_H);
+    // Only ever the single largest remaining blob -- "one thing at a time",
+    // whatever's actually in/near your hand rather than every bit of visual
+    // noise that differs from the background plate.
     const component = floodFillLargestComponent(mask, OUTLINE_GRID_W, OUTLINE_GRID_H);
     const minSize = OUTLINE_MIN_COMPONENT_FRACTION * OUTLINE_GRID_W * OUTLINE_GRID_H;
     lastOutlineHull = component.length >= minSize ? convexHull(component) : null;

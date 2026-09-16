@@ -57,6 +57,21 @@
     pointer-events: none; animation: markerFade 1.4s ease forwards;
   }
   @keyframes markerFade { 0% { opacity: 1; transform: scale(0.4);} 30% {transform: scale(1);} 100% { opacity: 0; transform: scale(1.8);} }
+
+  /* Phone-width layout: the two HUD panels sit side by side by default,
+     which overlaps badly on a ~390px-wide screen. Stack them, shrink the
+     text, and move the hand-tracking status badge out of the way of the
+     (now taller) gesture legend panel underneath it. */
+  @media (max-width: 700px) {
+    header.topbar h1 { font-size: 13px; }
+    header.topbar nav a { margin-left: 12px; font-size: 12px; }
+    #hud { flex-direction: column; gap: 8px; top: 56px; padding: 0 10px; }
+    #hud .panel { max-width: 100%; padding: 10px 14px; }
+    #hud .panel h2 { font-size: 12px; margin-bottom: 4px; }
+    #hud .hint { font-size: 12px; line-height: 1.4; }
+    #hands-status { top: auto; bottom: 100px; right: 10px; font-size: 12px; }
+    #gesture-badge { bottom: 20px; padding: 8px 16px; font-size: 13px; }
+  }
 </style>
 </head>
 <body>

@@ -353,7 +353,9 @@ async function boot() {
 
   async function initCamera() {
     const stream = await navigator.mediaDevices.getUserMedia({
-      video: { width: { ideal: 1280 }, height: { ideal: 720 } },
+      // This view is looking at your own hands/face -- front camera on a
+      // phone, hence "user" (only a hint, harmless on a single-camera laptop).
+      video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: { ideal: "user" } },
       audio: false,
     });
     video.srcObject = stream;

@@ -7,3 +7,4 @@ backend/scans/*
 !backend/scans/.gitkeep
 *.log
 .DS_Store
+certs/

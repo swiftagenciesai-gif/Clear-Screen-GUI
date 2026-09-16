@@ -112,6 +112,45 @@ Open:
 The backend also serves the frontend directly (no separate dev server, no
 CORS setup needed for normal local use).
 
+### Using it from your phone (iPhone or otherwise)
+
+Both pages work on a phone's browser -- same WiFi network, one extra setup
+step. **This step is not optional for iOS**: Safari (and every other mobile
+browser) only allows camera access (`getUserMedia`) on a "secure context",
+which means either `https://` or the exact hostname `localhost`. Visiting
+your Mac's plain `http://<lan-ip>:8000` from a phone will load the page but
+silently fail to get the camera -- there's no setting or workaround for that
+besides actually serving over TLS.
+
+```bash
+bash scripts/generate_dev_cert.sh
+cd backend
+uvicorn app:app --host 0.0.0.0 --port 8000 --ssl-keyfile=../certs/dev-key.pem --ssl-certfile=../certs/dev-cert.pem
+```
+
+Then from your phone, visit `https://<your-mac's-lan-ip>:8000/index.html`
+(the script prints the exact URL it detected). Your phone will warn that the
+certificate isn't trusted -- that's expected for a self-signed cert made for
+local testing, not a red flag. In Safari: tap "Show Details" -> "visit this
+website". The page still loads over a genuinely encrypted connection once
+you do, and the camera works normally from there.
+
+A few phone-specific things worth knowing:
+- The capture page asks for the **rear** camera by default (you're scanning
+  a physical object); the gesture viewer asks for the **front** camera
+  (you're looking at your own hands). Both are just hints, so a laptop with
+  one webcam still works fine.
+- MediaPipe Hands and the three.js viewer both run happily on a modern
+  iPhone, but it's genuinely more GPU/CPU work than a desktop browser doing
+  the same thing -- expect it to run warmer and the battery to drain faster
+  than normal camera use.
+- Voice control ("say Scan") depends on the Web Speech API, which has
+  inconsistent support in mobile Safari just like on desktop -- see the
+  on-page status message to know whether it's actually listening on your
+  device; the button always works regardless.
+- The video-recording capture mode uses `MediaRecorder`, which iOS Safari
+  has supported since 14.3 -- fine on any reasonably current iPhone.
+
 ---
 
 ## 3. Using it
@@ -349,6 +388,19 @@ computer-vision-verified coverage map.
 a downsampled grayscale frame -- fast to compute in-browser, but it can
 both miss real blur and occasionally flag a genuinely sharp but
 low-texture shot. Always glance at flagged thumbnails yourself.
+
+**The live object outline is background-subtraction, not object
+recognition.** It draws the convex hull of whatever's different from the
+background plate you captured, after erasing a small disk around each
+detected hand landmark so a held object doesn't just get lumped in with
+your hand/arm as one blob. It only ever shows one outline (the single
+largest remaining region) by design -- matching the "one object at a time"
+capture workflow -- but it isn't aware of what the object *is*, only that
+something changed from the empty background near your hand. A second
+object elsewhere in frame, a shadow that moves as you rotate the turntable,
+or a background that isn't actually static will all show up as part of (or
+instead of) the outline. It's a live sanity check on framing, not a
+guarantee of what will end up in the reconstruction.
 
 **Hardware constraints.**
 - No GPU is required to run the pipeline, but expect the CPU-only timings
