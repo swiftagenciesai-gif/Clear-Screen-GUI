@@ -37,6 +37,7 @@ import { GestureDetectorSystem } from "./gestures/detector.js";
   let scanId = null;
   let pollTimer = null;
   let lastOutlineHull = null; // grid-space convex hull points from the most recent frame, or null
+  let lastOutlineCentroid = null; // grid-space {x,y} of the locked-on object, for frame-to-frame continuity
   let latestHandLandmarks = []; // most recent frame's hands, each a 21-point landmark array in raw (unmirrored) video-normalized coords
   let handDetectorStarted = false;
 
@@ -158,14 +159,12 @@ import { GestureDetectorSystem } from "./gestures/detector.js";
     return gray;
   }
 
-  // 4-connected flood fill returning the largest connected foreground blob
-  // as a list of {x,y} grid points -- keeps a stray noisy pixel elsewhere in
-  // frame from being mistaken for the object.
-  function floodFillLargestComponent(mask, gw, gh) {
+  // 4-connected flood fill returning every connected foreground component
+  // (not just the largest) plus whether each one touches the grid edge.
+  function getAllComponents(mask, gw, gh) {
     const visited = new Uint8Array(gw * gh);
     const idx = (x, y) => y * gw + x;
-    let best = null;
-    let bestSize = 0;
+    const components = [];
     for (let y = 0; y < gh; y++) {
       for (let x = 0; x < gw; x++) {
         const i = idx(x, y);
@@ -173,9 +172,11 @@ import { GestureDetectorSystem } from "./gestures/detector.js";
         const stack = [[x, y]];
         visited[i] = 1;
         const points = [];
+        let touchesBorder = false;
         while (stack.length) {
           const [cx, cy] = stack.pop();
           points.push({ x: cx, y: cy });
+          if (cx === 0 || cy === 0 || cx === gw - 1 || cy === gh - 1) touchesBorder = true;
           const neighbors = [[cx - 1, cy], [cx + 1, cy], [cx, cy - 1], [cx, cy + 1]];
           for (const [nx, ny] of neighbors) {
             if (nx < 0 || ny < 0 || nx >= gw || ny >= gh) continue;
@@ -186,13 +187,53 @@ import { GestureDetectorSystem } from "./gestures/detector.js";
             }
           }
         }
-        if (points.length > bestSize) {
-          bestSize = points.length;
-          best = points;
-        }
+        components.push({ points, touchesBorder });
       }
     }
-    return best || [];
+    return components;
+  }
+
+  function centroidOf(points) {
+    let sx = 0, sy = 0;
+    for (const p of points) { sx += p.x; sy += p.y; }
+    return { x: sx / points.length, y: sy / points.length };
+  }
+
+  // Picks which connected component is "the object", rather than blindly
+  // taking whatever's biggest this frame:
+  //  - rejects anything touching the frame border (a webcam's auto-exposure
+  //    reacting to lighting changes, or an unmasked forearm segment, tends
+  //    to show up as noise attached to an edge -- the actual object should
+  //    be fully inside the frame)
+  //  - rejects anything covering most of the frame (a global brightness/
+  //    white-balance shift showing up as "everything is different")
+  //  - once something is locked on, strongly prefers whatever's closest to
+  //    where it was last frame over whatever's technically largest this
+  //    frame -- this is what stops the outline from flickering between
+  //    different regions frame to frame ("selecting random things") when
+  //    two candidate blobs are briefly similar in size.
+  function pickObjectComponent(mask, gw, gh, lastCentroid) {
+    const total = gw * gh;
+    const minFraction = OUTLINE_MIN_COMPONENT_FRACTION;
+    const maxFraction = 0.6;
+    const candidates = getAllComponents(mask, gw, gh).filter((c) => {
+      const frac = c.points.length / total;
+      return frac >= minFraction && frac <= maxFraction && !c.touchesBorder;
+    });
+    if (!candidates.length) return null;
+
+    if (lastCentroid) {
+      const gridDiag = Math.hypot(gw, gh);
+      let best = null, bestScore = -Infinity;
+      for (const c of candidates) {
+        const cen = centroidOf(c.points);
+        const dist = Math.hypot(cen.x - lastCentroid.x, cen.y - lastCentroid.y) / gridDiag;
+        const score = c.points.length / total - dist * 2.5; // distance dominates size
+        if (score > bestScore) { bestScore = score; best = c; }
+      }
+      return best.points;
+    }
+    return candidates.reduce((a, b) => (b.points.length > a.points.length ? b : a)).points;
   }
 
   function hullCross(o, a, b) {
@@ -266,6 +307,34 @@ import { GestureDetectorSystem } from "./gestures/detector.js";
           }
         }
       }
+      // MediaPipe only tracks the hand itself (wrist to fingertips), not the
+      // forearm -- left unmasked, that forearm segment can bridge the held
+      // object to the frame edge, or just look like a stray arm-shaped
+      // component. Approximate it by blanking a corridor from the wrist
+      // toward whichever frame edge is closest (the direction the arm is
+      // most likely continuing off-screen).
+      const wrist = landmarks[0];
+      const gx = Math.round(wrist.x * gw), gy = Math.round(wrist.y * gh);
+      const distances = { left: wrist.x, right: 1 - wrist.x, top: wrist.y, bottom: 1 - wrist.y };
+      const nearestEdge = Object.keys(distances).reduce((a, b) => (distances[a] < distances[b] ? a : b));
+      const halfWidth = Math.round(gw * 0.035);
+      if (nearestEdge === "left" || nearestEdge === "right") {
+        const xRange = nearestEdge === "left" ? [0, gx] : [gx, gw - 1];
+        for (let x = xRange[0]; x <= xRange[1]; x++) {
+          for (let dy = -halfWidth; dy <= halfWidth; dy++) {
+            const y = gy + dy;
+            if (x >= 0 && x < gw && y >= 0 && y < gh) mask[y * gw + x] = 0;
+          }
+        }
+      } else {
+        const yRange = nearestEdge === "top" ? [0, gy] : [gy, gh - 1];
+        for (let y = yRange[0]; y <= yRange[1]; y++) {
+          for (let dx = -halfWidth; dx <= halfWidth; dx++) {
+            const x = gx + dx;
+            if (x >= 0 && x < gw && y >= 0 && y < gh) mask[y * gw + x] = 0;
+          }
+        }
+      }
     }
   }
 
@@ -274,6 +343,7 @@ import { GestureDetectorSystem } from "./gestures/detector.js";
   function updateObjectOutline() {
     if (!backgroundGrayGrid || video.readyState < 2) {
       lastOutlineHull = null;
+      lastOutlineCentroid = null;
       return;
     }
     const currentGray = computeGrayGrid(video);
@@ -282,12 +352,19 @@ import { GestureDetectorSystem } from "./gestures/detector.js";
       mask[i] = Math.abs(currentGray[i] - backgroundGrayGrid[i]) > OUTLINE_DIFF_THRESHOLD ? 1 : 0;
     }
     if (latestHandLandmarks.length) excludeHandsFromMask(mask, OUTLINE_GRID_W, OUTLINE_GRID_H);
-    // Only ever the single largest remaining blob -- "one thing at a time",
-    // whatever's actually in/near your hand rather than every bit of visual
-    // noise that differs from the background plate.
-    const component = floodFillLargestComponent(mask, OUTLINE_GRID_W, OUTLINE_GRID_H);
-    const minSize = OUTLINE_MIN_COMPONENT_FRACTION * OUTLINE_GRID_W * OUTLINE_GRID_H;
-    lastOutlineHull = component.length >= minSize ? convexHull(component) : null;
+    // Only ever the single object component -- "one thing at a time" --
+    // picked by size plus temporal continuity with the last frame's lock
+    // rather than just whatever's biggest this instant (see
+    // pickObjectComponent for why: that's what stops it flickering between
+    // different regions).
+    const component = pickObjectComponent(mask, OUTLINE_GRID_W, OUTLINE_GRID_H, lastOutlineCentroid);
+    if (component) {
+      lastOutlineCentroid = centroidOf(component);
+      lastOutlineHull = convexHull(component);
+    } else {
+      lastOutlineCentroid = null;
+      lastOutlineHull = null;
+    }
   }
 
   function drawObjectOutline() {

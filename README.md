@@ -391,14 +391,20 @@ low-texture shot. Always glance at flagged thumbnails yourself.
 
 **The live object outline is background-subtraction, not object
 recognition.** It draws the convex hull of whatever's different from the
-background plate you captured, after erasing a small disk around each
-detected hand landmark so a held object doesn't just get lumped in with
-your hand/arm as one blob. It only ever shows one outline (the single
-largest remaining region) by design -- matching the "one object at a time"
-capture workflow -- but it isn't aware of what the object *is*, only that
-something changed from the empty background near your hand. A second
+background plate you captured, after erasing a disk around each detected
+hand landmark plus a corridor from the wrist toward the nearest frame edge
+(approximating the forearm, which MediaPipe doesn't track) so a held object
+doesn't just get lumped in with your hand/arm as one blob. It rejects
+candidate regions that touch the frame border (usually a lighting artifact
+or an unmasked bit of arm, not the object) or that cover most of the frame
+(a global exposure/white-balance shift, not an actual change), and once it's
+picked something, it favors staying with whatever's closest to that same
+spot next frame over jumping to whatever's technically largest -- that's
+what keeps it from flickering between different regions. None of that makes
+it object recognition, though: it isn't aware of what the object *is*, only
+that something changed from the empty background near your hand. A second
 object elsewhere in frame, a shadow that moves as you rotate the turntable,
-or a background that isn't actually static will all show up as part of (or
+or a background that isn't actually static can still show up as part of (or
 instead of) the outline. It's a live sanity check on framing, not a
 guarantee of what will end up in the reconstruction.
 
