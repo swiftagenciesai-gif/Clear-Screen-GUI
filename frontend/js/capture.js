@@ -7,6 +7,15 @@
   const TARGET_SHOTS = 36; // 360 / 36 = 10 degrees/shot -- a reasonable default density
   const BLUR_VARIANCE_THRESHOLD = 25; // below this, flag the shot as likely blurry
 
+  // Live object-outline detection: the same background-subtraction idea the
+  // backend uses for masking (masks.py), just done cheaply in-browser on a
+  // small grid so it can run every frame as a continuous preview of what the
+  // app currently sees as "the object", well before any photo is taken.
+  const OUTLINE_GRID_W = 120;
+  const OUTLINE_GRID_H = 68;
+  const OUTLINE_DIFF_THRESHOLD = 25;
+  const OUTLINE_MIN_COMPONENT_FRACTION = 0.01; // ignore blobs smaller than 1% of the grid as noise
+
   const COLMAP_STEPS = [
     "masking", "feature_extraction", "matching", "sparse_reconstruction",
     "undistortion", "dense_stereo", "stereo_fusion", "meshing", "mesh_export",
@@ -20,10 +29,12 @@
 
   let stream = null;
   let backgroundBlob = null;
+  let backgroundGrayGrid = null; // Float32Array, OUTLINE_GRID_W x OUTLINE_GRID_H, set once background is captured
   let shots = []; // { blob, sharpness, blurry }
   let autoTimer = null;
   let scanId = null;
   let pollTimer = null;
+  let lastOutlineHull = null; // grid-space convex hull points from the most recent frame, or null
 
   // ---------- Camera setup ----------------------------------------------------
 
@@ -58,7 +69,6 @@
     overlay.height = video.videoHeight;
     await listCameras();
     $("bg-panel").style.display = "block";
-    drawCoverageRing();
   }
 
   $("btn-start-cam").addEventListener("click", async () => {
@@ -122,12 +132,150 @@
     return new Promise((res) => canvas.toBlob(res, "image/jpeg", quality));
   }
 
+  // ---------- Live object outline (background-subtraction on a small grid) ---
+
+  const outlineGridCanvas = document.createElement("canvas");
+  outlineGridCanvas.width = OUTLINE_GRID_W;
+  outlineGridCanvas.height = OUTLINE_GRID_H;
+  const outlineGridCtx = outlineGridCanvas.getContext("2d", { willReadFrequently: true });
+
+  function computeGrayGrid(source) {
+    outlineGridCtx.drawImage(source, 0, 0, OUTLINE_GRID_W, OUTLINE_GRID_H);
+    const { data } = outlineGridCtx.getImageData(0, 0, OUTLINE_GRID_W, OUTLINE_GRID_H);
+    const gray = new Float32Array(OUTLINE_GRID_W * OUTLINE_GRID_H);
+    for (let i = 0; i < gray.length; i++) {
+      gray[i] = 0.299 * data[i * 4] + 0.587 * data[i * 4 + 1] + 0.114 * data[i * 4 + 2];
+    }
+    return gray;
+  }
+
+  // 4-connected flood fill returning the largest connected foreground blob
+  // as a list of {x,y} grid points -- keeps a stray noisy pixel elsewhere in
+  // frame from being mistaken for the object.
+  function floodFillLargestComponent(mask, gw, gh) {
+    const visited = new Uint8Array(gw * gh);
+    const idx = (x, y) => y * gw + x;
+    let best = null;
+    let bestSize = 0;
+    for (let y = 0; y < gh; y++) {
+      for (let x = 0; x < gw; x++) {
+        const i = idx(x, y);
+        if (!mask[i] || visited[i]) continue;
+        const stack = [[x, y]];
+        visited[i] = 1;
+        const points = [];
+        while (stack.length) {
+          const [cx, cy] = stack.pop();
+          points.push({ x: cx, y: cy });
+          const neighbors = [[cx - 1, cy], [cx + 1, cy], [cx, cy - 1], [cx, cy + 1]];
+          for (const [nx, ny] of neighbors) {
+            if (nx < 0 || ny < 0 || nx >= gw || ny >= gh) continue;
+            const ni = idx(nx, ny);
+            if (mask[ni] && !visited[ni]) {
+              visited[ni] = 1;
+              stack.push([nx, ny]);
+            }
+          }
+        }
+        if (points.length > bestSize) {
+          bestSize = points.length;
+          best = points;
+        }
+      }
+    }
+    return best || [];
+  }
+
+  function hullCross(o, a, b) {
+    return (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+  }
+
+  // Andrew's monotone chain convex hull. This traces the outer boundary of
+  // whatever's different from the background plate -- for most household
+  // objects that's a good, robust approximation of their silhouette, and
+  // much simpler (and less bug-prone) to get right than pixel-level contour
+  // tracing with concave notches.
+  function convexHull(points) {
+    if (points.length < 3) return points.slice();
+    const pts = points.slice().sort((a, b) => (a.x === b.x ? a.y - b.y : a.x - b.x));
+    const lower = [];
+    for (const p of pts) {
+      while (lower.length >= 2 && hullCross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) lower.pop();
+      lower.push(p);
+    }
+    const upper = [];
+    for (let i = pts.length - 1; i >= 0; i--) {
+      const p = pts[i];
+      while (upper.length >= 2 && hullCross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) upper.pop();
+      upper.push(p);
+    }
+    lower.pop();
+    upper.pop();
+    return lower.concat(upper);
+  }
+
+  // Recomputes the live outline from the current video frame. Cheap enough
+  // (a 120x68 grid) to call every animation frame.
+  function updateObjectOutline() {
+    if (!backgroundGrayGrid || video.readyState < 2) {
+      lastOutlineHull = null;
+      return;
+    }
+    const currentGray = computeGrayGrid(video);
+    const mask = new Uint8Array(OUTLINE_GRID_W * OUTLINE_GRID_H);
+    for (let i = 0; i < mask.length; i++) {
+      mask[i] = Math.abs(currentGray[i] - backgroundGrayGrid[i]) > OUTLINE_DIFF_THRESHOLD ? 1 : 0;
+    }
+    const component = floodFillLargestComponent(mask, OUTLINE_GRID_W, OUTLINE_GRID_H);
+    const minSize = OUTLINE_MIN_COMPONENT_FRACTION * OUTLINE_GRID_W * OUTLINE_GRID_H;
+    lastOutlineHull = component.length >= minSize ? convexHull(component) : null;
+  }
+
+  function drawObjectOutline() {
+    if (!lastOutlineHull || lastOutlineHull.length < 3) return;
+    const sx = overlay.width / OUTLINE_GRID_W;
+    const sy = overlay.height / OUTLINE_GRID_H;
+    octx.save();
+    octx.beginPath();
+    lastOutlineHull.forEach((p, i) => {
+      const x = (p.x + 0.5) * sx;
+      const y = (p.y + 0.5) * sy;
+      if (i === 0) octx.moveTo(x, y);
+      else octx.lineTo(x, y);
+    });
+    octx.closePath();
+    octx.lineJoin = "round";
+    octx.fillStyle = "rgba(51, 224, 255, 0.12)";
+    octx.strokeStyle = "#33e0ff";
+    octx.lineWidth = 3;
+    octx.shadowColor = "#33e0ff";
+    octx.shadowBlur = 8;
+    octx.fill();
+    octx.stroke();
+    octx.restore();
+  }
+
+  // Continuous render loop for the overlay: live object outline underneath,
+  // coverage ring on top, running the whole time the camera is on rather
+  // than only redrawing on specific button clicks.
+  function overlayLoop() {
+    if (overlay.width && overlay.height) {
+      octx.clearRect(0, 0, overlay.width, overlay.height);
+      updateObjectOutline();
+      drawObjectOutline();
+      drawCoverageRingOnly();
+    }
+    requestAnimationFrame(overlayLoop);
+  }
+  requestAnimationFrame(overlayLoop);
+
   // ---------- Background step -----------------------------------------------
 
   $("btn-capture-bg").addEventListener("click", async () => {
     const canvas = grabFrameCanvas();
     backgroundBlob = await canvasToBlob(canvas);
-    $("bg-status").textContent = "Background captured ✓";
+    backgroundGrayGrid = computeGrayGrid(video);
+    $("bg-status").textContent = "Background captured ✓ -- live object outline is now active below.";
     $("capture-panel").style.display = "block";
     $("deg-per-shot").textContent = Math.round(360 / TARGET_SHOTS);
     $("target-shots-label").textContent = TARGET_SHOTS;
@@ -172,17 +320,16 @@
     $("coverage-pct").textContent = Math.min(100, Math.round((shots.length / TARGET_SHOTS) * 100)) + "%";
     $("blur-count").textContent = shots.filter((s) => s.blurry).length;
     $("upload-panel").style.display = shots.length >= 8 ? "block" : "none";
-    drawCoverageRing();
   }
 
   // Draws a ring of tick marks around the video, one per target shot slot,
   // filled in as shots are taken. This assumes each capture corresponds to
   // one even rotation step -- it's a capture-count guide, not a real computer
-  // vision estimate of the object's actual turned angle.
-  function drawCoverageRing() {
+  // vision estimate of the object's actual turned angle. Called from the
+  // continuous overlayLoop, which owns clearing the canvas each frame.
+  function drawCoverageRingOnly() {
     const w = overlay.width, h = overlay.height;
     if (!w || !h) return;
-    octx.clearRect(0, 0, w, h);
     const cx = w / 2, cy = h / 2, r = Math.min(w, h) * 0.46;
     for (let i = 0; i < TARGET_SHOTS; i++) {
       const angle = (i / TARGET_SHOTS) * Math.PI * 2 - Math.PI / 2;
