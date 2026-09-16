@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>3D Gesture Viewer</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ccircle cx='50' cy='50' r='40' fill='none' stroke='%2333e0ff' stroke-width='8'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="css/style.css">
+<style>
+  body { overflow: hidden; }
+  #stage {
+    position: fixed; inset: 0;
+    background: #000;
+  }
+  #webcam {
+    position: absolute; inset: 0;
+    width: 100%; height: 100%;
+    object-fit: cover;
+    transform: scaleX(-1); /* mirror for a natural "looking in a mirror" feel */
+  }
+  #hand-overlay, #three-canvas {
+    position: absolute; inset: 0;
+    width: 100%; height: 100%;
+  }
+  /* hand-overlay draws using already-mirrored landmark coordinates (see
+     detector.js's `mirror: true` option), so it must NOT also get a CSS
+     mirror transform -- that would flip it back to the wrong side. */
+  #hand-overlay { pointer-events: none; }
+  #three-canvas { pointer-events: none; }
+
+  #hud {
+    position: absolute; top: 70px; left: 0; right: 0;
+    display: flex; justify-content: space-between; padding: 0 20px;
+    pointer-events: none;
+  }
+  #hud .panel { pointer-events: auto; max-width: 280px; }
+
+  #gesture-badge {
+    position: fixed; bottom: 40px; left: 50%; transform: translateX(-50%) translateY(20px);
+    background: rgba(10, 18, 30, 0.85); border: 1px solid var(--accent);
+    color: var(--accent); padding: 10px 22px; border-radius: 30px;
+    font-size: 15px; letter-spacing: 0.03em; opacity: 0; transition: all 0.25s ease;
+    pointer-events: none; text-align: center;
+  }
+  #gesture-badge .sub { display: block; font-size: 11px; color: var(--text-dim); margin-top: 2px; }
+  #gesture-badge.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+  #hands-status { position: fixed; top: 70px; right: 20px; }
+  .status-dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:6px; }
+  .status-dot.ready, .status-dot.tracking { background: var(--good); }
+  .status-dot.no-hands { background: var(--warn); }
+  .status-dot.error, .status-dot.loading { background: var(--bad); }
+
+  .marker-dot {
+    position: fixed; width: 14px; height: 14px; margin: -7px 0 0 -7px;
+    border-radius: 50%; background: var(--accent); box-shadow: 0 0 16px 4px var(--accent);
+    pointer-events: none; animation: markerFade 1.4s ease forwards;
+  }
+  @keyframes markerFade { 0% { opacity: 1; transform: scale(0.4);} 30% {transform: scale(1);} 100% { opacity: 0; transform: scale(1.8);} }
+</style>
+</head>
+<body>
+
+<header class="topbar" style="position:fixed; top:0; left:0; right:0; z-index: 30;">
+  <h1>&#9679; 3D Gesture Viewer</h1>
+  <nav>
+    <a href="index.html">Capture</a>
+    <a href="viewer.html" class="active">Viewer</a>
+  </nav>
+</header>
+
+<div id="stage">
+  <video id="webcam" autoplay playsinline muted></video>
+  <canvas id="hand-overlay"></canvas>
+  <canvas id="three-canvas"></canvas>
+</div>
+
+<div id="hud">
+  <div class="panel" id="scan-panel">
+    <h2>Model</h2>
+    <div id="scan-name" class="hint">No scan loaded</div>
+    <div class="hint" id="scan-cycle-hint">Swipe left/right to cycle scans</div>
+  </div>
+  <div class="panel" id="gesture-legend">
+    <h2>Gestures</h2>
+    <div class="hint">
+      Pinch + drag / two-hand spread &rarr; scale<br>
+      Move open hand &rarr; rotate<br>
+      Open palm &rarr; reset view<br>
+      Swipe left/right &rarr; cycle scans<br>
+      Fist &rarr; toggle wireframe<br>
+      Point &rarr; spawn marker
+    </div>
+  </div>
+</div>
+
+<div id="hands-status" class="hint"><span class="status-dot loading"></span><span id="hands-status-text">Loading hand tracking...</span></div>
+<div id="gesture-badge"><span id="gesture-badge-text"></span><span class="sub" id="gesture-badge-sub"></span></div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.169.0/examples/jsm/"
+  }
+}
+</script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+<script type="module" src="js/viewer.js"></script>
+</body>
+</html>

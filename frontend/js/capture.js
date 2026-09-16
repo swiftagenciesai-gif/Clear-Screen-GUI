@@ -1,0 +1,369 @@
+// Turntable capture UI: webcam access, background plate step, guided
+// multi-shot capture with a coverage ring + blur warnings, then upload and
+// kick off backend reconstruction with live progress polling.
+(() => {
+  "use strict";
+
+  const TARGET_SHOTS = 36; // 360 / 36 = 10 degrees/shot -- a reasonable default density
+  const BLUR_VARIANCE_THRESHOLD = 25; // below this, flag the shot as likely blurry
+
+  const COLMAP_STEPS = [
+    "masking", "feature_extraction", "matching", "sparse_reconstruction",
+    "undistortion", "dense_stereo", "stereo_fusion", "meshing", "mesh_export",
+  ];
+  const MESHROOM_STEPS = ["masking", "meshroom_batch", "mesh_export"];
+
+  const $ = (id) => document.getElementById(id);
+  const video = $("video");
+  const overlay = $("overlay");
+  const octx = overlay.getContext("2d");
+
+  let stream = null;
+  let backgroundBlob = null;
+  let shots = []; // { blob, sharpness, blurry }
+  let autoTimer = null;
+  let scanId = null;
+  let pollTimer = null;
+
+  // ---------- Camera setup ----------------------------------------------------
+
+  async function listCameras() {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const cams = devices.filter((d) => d.kind === "videoinput");
+    const select = $("camera-select");
+    select.innerHTML = "";
+    cams.forEach((c, i) => {
+      const opt = document.createElement("option");
+      opt.value = c.deviceId;
+      opt.textContent = c.label || `Camera ${i + 1}`;
+      select.appendChild(opt);
+    });
+    select.style.display = cams.length > 1 ? "inline-block" : "none";
+  }
+
+  async function startCamera(deviceId) {
+    if (stream) stream.getTracks().forEach((t) => t.stop());
+    const constraints = {
+      video: {
+        deviceId: deviceId ? { exact: deviceId } : undefined,
+        width: { ideal: 1920 },
+        height: { ideal: 1080 },
+      },
+      audio: false,
+    };
+    stream = await navigator.mediaDevices.getUserMedia(constraints);
+    video.srcObject = stream;
+    await new Promise((res) => (video.onloadedmetadata = res));
+    overlay.width = video.videoWidth;
+    overlay.height = video.videoHeight;
+    await listCameras();
+    $("bg-panel").style.display = "block";
+    drawCoverageRing();
+  }
+
+  $("btn-start-cam").addEventListener("click", async () => {
+    try {
+      await startCamera(null);
+      $("btn-start-cam").textContent = "Camera Active";
+      $("btn-start-cam").disabled = true;
+    } catch (err) {
+      alert("Could not access camera: " + err.message);
+    }
+  });
+
+  $("camera-select").addEventListener("change", (e) => startCamera(e.target.value));
+
+  // ---------- Frame capture + sharpness -----------------------------------------
+
+  function grabFrameCanvas() {
+    const c = document.createElement("canvas");
+    c.width = video.videoWidth;
+    c.height = video.videoHeight;
+    c.getContext("2d").drawImage(video, 0, 0, c.width, c.height);
+    return c;
+  }
+
+  // Fast approximate blur detector: downsample to a small grayscale image and
+  // compute the variance of a simple Laplacian-like convolution. Low variance
+  // means few sharp edges, i.e. probably motion-blurred or out of focus. This
+  // is a heuristic, not a substitute for reviewing the actual thumbnail.
+  function estimateSharpness(sourceCanvas) {
+    const w = 160, h = Math.round((160 * sourceCanvas.height) / sourceCanvas.width);
+    const c = document.createElement("canvas");
+    c.width = w; c.height = h;
+    const ctx = c.getContext("2d");
+    ctx.drawImage(sourceCanvas, 0, 0, w, h);
+    const { data } = ctx.getImageData(0, 0, w, h);
+    const gray = new Float32Array(w * h);
+    for (let i = 0; i < w * h; i++) {
+      const r = data[i * 4], g = data[i * 4 + 1], b = data[i * 4 + 2];
+      gray[i] = 0.299 * r + 0.587 * g + 0.114 * b;
+    }
+    const lap = [];
+    for (let y = 1; y < h - 1; y++) {
+      for (let x = 1; x < w - 1; x++) {
+        const idx = y * w + x;
+        const val =
+          4 * gray[idx] - gray[idx - 1] - gray[idx + 1] - gray[idx - w] - gray[idx + w];
+        lap.push(val);
+      }
+    }
+    const mean = lap.reduce((a, b) => a + b, 0) / lap.length;
+    const variance = lap.reduce((a, v) => a + (v - mean) ** 2, 0) / lap.length;
+    return variance;
+  }
+
+  function canvasToBlob(canvas, quality = 0.92) {
+    return new Promise((res) => canvas.toBlob(res, "image/jpeg", quality));
+  }
+
+  // ---------- Background step -----------------------------------------------
+
+  $("btn-capture-bg").addEventListener("click", async () => {
+    const canvas = grabFrameCanvas();
+    backgroundBlob = await canvasToBlob(canvas);
+    $("bg-status").textContent = "Background captured ✓";
+    $("capture-panel").style.display = "block";
+    $("deg-per-shot").textContent = Math.round(360 / TARGET_SHOTS);
+    $("target-shots-label").textContent = TARGET_SHOTS;
+  });
+
+  // ---------- Turntable capture -----------------------------------------------
+
+  function renderThumbs() {
+    const grid = $("thumbs");
+    grid.innerHTML = "";
+    shots.forEach((shot, i) => {
+      const div = document.createElement("div");
+      div.className = "thumb" + (shot.blurry ? " blurry" : "");
+      const img = document.createElement("img");
+      img.src = URL.createObjectURL(shot.blob);
+      div.appendChild(img);
+      const idx = document.createElement("span");
+      idx.className = "idx";
+      idx.textContent = i + 1;
+      div.appendChild(idx);
+      const del = document.createElement("button");
+      del.className = "del";
+      del.textContent = "✕";
+      del.onclick = () => {
+        shots.splice(i, 1);
+        renderThumbs();
+        updateStats();
+      };
+      div.appendChild(del);
+      if (shot.blurry) {
+        const b = document.createElement("span");
+        b.className = "blur-badge";
+        b.textContent = "possibly blurry";
+        div.appendChild(b);
+      }
+      grid.appendChild(div);
+    });
+  }
+
+  function updateStats() {
+    $("shot-count").textContent = shots.length;
+    $("coverage-pct").textContent = Math.min(100, Math.round((shots.length / TARGET_SHOTS) * 100)) + "%";
+    $("blur-count").textContent = shots.filter((s) => s.blurry).length;
+    $("upload-panel").style.display = shots.length >= 8 ? "block" : "none";
+    drawCoverageRing();
+  }
+
+  // Draws a ring of tick marks around the video, one per target shot slot,
+  // filled in as shots are taken. This assumes each capture corresponds to
+  // one even rotation step -- it's a capture-count guide, not a real computer
+  // vision estimate of the object's actual turned angle.
+  function drawCoverageRing() {
+    const w = overlay.width, h = overlay.height;
+    if (!w || !h) return;
+    octx.clearRect(0, 0, w, h);
+    const cx = w / 2, cy = h / 2, r = Math.min(w, h) * 0.46;
+    for (let i = 0; i < TARGET_SHOTS; i++) {
+      const angle = (i / TARGET_SHOTS) * Math.PI * 2 - Math.PI / 2;
+      const x1 = cx + Math.cos(angle) * r;
+      const y1 = cy + Math.sin(angle) * r;
+      const x2 = cx + Math.cos(angle) * (r - 14);
+      const y2 = cy + Math.sin(angle) * (r - 14);
+      octx.strokeStyle = i < shots.length ? "#33e0ff" : "rgba(255,255,255,0.25)";
+      octx.lineWidth = 3;
+      octx.beginPath();
+      octx.moveTo(x1, y1);
+      octx.lineTo(x2, y2);
+      octx.stroke();
+    }
+  }
+
+  async function captureShot() {
+    const canvas = grabFrameCanvas();
+    const sharpness = estimateSharpness(canvas);
+    const blob = await canvasToBlob(canvas);
+    shots.push({ blob, sharpness, blurry: sharpness < BLUR_VARIANCE_THRESHOLD });
+    renderThumbs();
+    updateStats();
+    flashCapture();
+  }
+
+  function flashCapture() {
+    overlay.style.filter = "brightness(2)";
+    setTimeout(() => (overlay.style.filter = ""), 100);
+  }
+
+  $("btn-capture-shot").addEventListener("click", captureShot);
+  window.addEventListener("keydown", (e) => {
+    if (e.code === "Space" && $("capture-panel").style.display !== "none") {
+      e.preventDefault();
+      captureShot();
+    }
+  });
+
+  let autoCountdown = null;
+  $("btn-auto-toggle").addEventListener("click", () => {
+    if (autoTimer) {
+      clearInterval(autoTimer);
+      clearInterval(autoCountdown);
+      autoTimer = null;
+      $("btn-auto-toggle").textContent = "Start Auto-Capture";
+      return;
+    }
+    const intervalSec = parseFloat($("auto-interval").value) || 2;
+    $("btn-auto-toggle").textContent = `Auto-capturing (every ${intervalSec}s) - click to stop`;
+    autoTimer = setInterval(captureShot, intervalSec * 1000);
+  });
+
+  // ---------- Upload + processing ---------------------------------------------
+
+  async function apiUploadFile(url, blob, filename) {
+    const fd = new FormData();
+    fd.append("file", blob, filename);
+    const res = await fetch(url, { method: "POST", body: fd });
+    if (!res.ok) throw new Error(`Upload failed: ${res.status} ${await res.text()}`);
+    return res.json();
+  }
+
+  $("btn-upload-process").addEventListener("click", async () => {
+    const btn = $("btn-upload-process");
+    btn.disabled = true;
+    $("processing-status").style.display = "block";
+    try {
+      const createRes = await fetch("/api/scans", { method: "POST" });
+      const scan = await createRes.json();
+      scanId = scan.id;
+
+      if (backgroundBlob) {
+        setStatusMessage("Uploading background plate...");
+        await apiUploadFile(`/api/scans/${scanId}/background`, backgroundBlob, "background.jpg");
+      }
+
+      for (let i = 0; i < shots.length; i++) {
+        setStatusMessage(`Uploading photo ${i + 1}/${shots.length}...`);
+        await apiUploadFile(`/api/scans/${scanId}/photos`, shots[i].blob, `frame_${i}.jpg`);
+      }
+
+      setStatusMessage("Starting reconstruction...");
+      const engine = $("engine-select").value;
+      const startRes = await fetch(`/api/scans/${scanId}/process?engine=${engine}`, { method: "POST" });
+      if (!startRes.ok) throw new Error(await startRes.text());
+
+      buildStepList("colmap");
+      startPolling();
+    } catch (err) {
+      setStatusMessage("Error: " + err.message);
+      btn.disabled = false;
+    }
+  });
+
+  function setStatusMessage(msg) {
+    $("status-message").textContent = msg;
+  }
+
+  function buildStepList(engine) {
+    const steps = engine === "meshroom" ? MESHROOM_STEPS : COLMAP_STEPS;
+    const el = $("step-list");
+    el.innerHTML = "";
+    steps.forEach((s) => {
+      const pill = document.createElement("span");
+      pill.className = "step-pill";
+      pill.dataset.step = s;
+      pill.textContent = s.replace(/_/g, " ");
+      el.appendChild(pill);
+    });
+  }
+
+  function startPolling() {
+    if (pollTimer) clearInterval(pollTimer);
+    pollTimer = setInterval(pollStatus, 1500);
+    pollStatus();
+  }
+
+  async function pollStatus() {
+    const res = await fetch(`/api/scans/${scanId}/status`);
+    if (!res.ok) return;
+    const s = await res.json();
+
+    if (s.engine) buildStepList(s.engine);
+
+    const badge = $("state-badge");
+    badge.textContent = s.state;
+    badge.className = "badge state-" + s.state;
+
+    const pct = Math.round((s.overall_progress || 0) * 100);
+    $("progress-bar").style.width = pct + "%";
+    $("progress-pct").textContent = pct + "%";
+    setStatusMessage(s.message || "");
+
+    document.querySelectorAll("#step-list .step-pill").forEach((pill) => {
+      pill.classList.remove("active", "done");
+      const steps = s.engine === "meshroom" ? MESHROOM_STEPS : COLMAP_STEPS;
+      const curIdx = steps.indexOf(s.step);
+      const pillIdx = steps.indexOf(pill.dataset.step);
+      if (pillIdx < curIdx) pill.classList.add("done");
+      if (pillIdx === curIdx) pill.classList.add("active");
+    });
+
+    const logBox = $("log-box");
+    logBox.textContent = (s.log_tail || []).join("\n");
+    logBox.scrollTop = logBox.scrollHeight;
+
+    if (s.state === "done") {
+      clearInterval(pollTimer);
+      $("done-actions").style.display = "flex";
+      $("btn-view").href = `viewer.html?scan=${scanId}`;
+      refreshScanList();
+    } else if (s.state === "error") {
+      clearInterval(pollTimer);
+      $("btn-upload-process").disabled = false;
+    }
+  }
+
+  // ---------- Previous scans ---------------------------------------------------
+
+  async function refreshScanList() {
+    const res = await fetch("/api/scans");
+    const scans = await res.json();
+    const el = $("scan-list");
+    if (!scans.length) {
+      el.innerHTML = '<p class="hint">No scans yet.</p>';
+      return;
+    }
+    el.innerHTML = "";
+    scans.forEach((s) => {
+      const row = document.createElement("div");
+      row.className = "scan-row";
+      row.innerHTML = `
+        <span class="id">${s.id}</span>
+        <span class="badge state-${s.state}">${s.state}</span>
+        <span>
+          ${s.glb_ready ? `<a class="btn" href="viewer.html?scan=${s.id}">View</a>` : ""}
+          <button class="btn danger" data-id="${s.id}">Delete</button>
+        </span>`;
+      row.querySelector("button.danger").addEventListener("click", async (e) => {
+        await fetch(`/api/scans/${s.id}`, { method: "DELETE" });
+        refreshScanList();
+      });
+      el.appendChild(row);
+    });
+  }
+
+  refreshScanList();
+})();
