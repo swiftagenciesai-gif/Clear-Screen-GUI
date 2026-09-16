@@ -401,16 +401,22 @@ unmasked bit of arm, but a legitimately large or tightly-framed object can
 touch an edge too, and should still win when it's clearly the best
 candidate); only a region covering virtually the *entire* frame -- a global
 exposure/white-balance shift, not an actual object -- gets thrown out
-completely. Once it's picked something, it favors staying with whatever's
-closest to that same spot next frame over jumping to whatever's technically
-largest -- that's what keeps it from flickering between different regions.
-None of that makes it object recognition, though: it isn't aware of what
-the object *is*, only
-that something changed from the empty background near your hand. A second
-object elsewhere in frame, a shadow that moves as you rotate the turntable,
-or a background that isn't actually static can still show up as part of (or
-instead of) the outline. It's a live sanity check on framing, not a
-guarantee of what will end up in the reconstruction.
+completely. It only ever draws **one** outline: with nothing locked on yet,
+it takes the single largest candidate, even if several distinct things
+changed in the same frame. Once something is locked on, a new candidate has
+to both sit near the same spot *and* be a similar size to take over the lock
+-- a hand or a second object passing nearby can't steal it just by being
+slightly closer. A brief miss (a hand fully covering the object for a
+frame or two, a flash of glare) doesn't drop the lock either; it keeps
+drawing the last known outline for about half a second before giving up and
+letting the next thing it sees become the new lock. None of that makes it
+object recognition, though: it isn't aware of what the object *is*, only
+that something changed from the empty background near your hand. If the
+object leaves frame for good and something else (a second object, your own
+arm) is now the biggest change from the background, that's what it'll lock
+onto next -- it can't tell "your object" apart from "whatever's different"
+by identity, only by size and position continuity. It's a live sanity check
+on framing, not a guarantee of what will end up in the reconstruction.
 
 **Hardware constraints.**
 - No GPU is required to run the pipeline, but expect the CPU-only timings

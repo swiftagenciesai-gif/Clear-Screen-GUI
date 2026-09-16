@@ -17,6 +17,7 @@ import { GestureDetectorSystem } from "./gestures/detector.js";
   const OUTLINE_GRID_H = 68;
   const OUTLINE_DIFF_THRESHOLD = 25;
   const OUTLINE_MIN_COMPONENT_FRACTION = 0.01; // ignore blobs smaller than 1% of the grid as noise
+  const OUTLINE_LOCK_GRACE_FRAMES = 20; // ~0.3-0.6s of missed detections before a lock is considered truly lost
 
   const COLMAP_STEPS = [
     "masking", "feature_extraction", "matching", "sparse_reconstruction",
@@ -38,6 +39,8 @@ import { GestureDetectorSystem } from "./gestures/detector.js";
   let pollTimer = null;
   let lastOutlineHull = null; // grid-space convex hull points from the most recent frame, or null
   let lastOutlineCentroid = null; // grid-space {x,y} of the locked-on object, for frame-to-frame continuity
+  let lastOutlineSize = null; // fraction of the grid the locked-on object covered, for size-continuity
+  let outlineLostStreak = 0; // consecutive frames with no matching candidate since the last lock
   let latestHandLandmarks = []; // most recent frame's hands, each a 21-point landmark array in raw (unmirrored) video-normalized coords
   let handDetectorStarted = false;
 
@@ -209,10 +212,15 @@ import { GestureDetectorSystem } from "./gestures/detector.js";
   // the frame, as long as it's clearly the best candidate available.
   //  - only a candidate covering virtually the *entire* frame (a global
   //    exposure/white-balance shift, not a real object) is rejected outright
-  //  - once something is locked on, prefers whatever's closest to where it
-  //    was last frame over whatever's technically largest this frame, so a
-  //    same-instant larger blob elsewhere doesn't steal the lock.
-  function pickObjectComponent(mask, gw, gh, lastCentroid) {
+  //  - with no prior lock, the single largest candidate wins -- exactly one
+  //    object is ever picked, even if several show up in the same frame
+  //  - once something is locked on, a candidate must look like the *same*
+  //    object to take over the lock: both close to where it was last frame
+  //    AND a similar size, not just whichever's technically closest or
+  //    biggest this instant. Without the size term, a hand or a second
+  //    object passing near the locked one could steal the lock just by
+  //    being a few grid cells nearer.
+  function pickObjectComponent(mask, gw, gh, lastCentroid, lastSize) {
     const total = gw * gh;
     const minFraction = OUTLINE_MIN_COMPONENT_FRACTION;
     const maxFraction = 0.97; // reject only "virtually the whole frame changed"
@@ -227,15 +235,18 @@ import { GestureDetectorSystem } from "./gestures/detector.js";
     for (const c of candidates) {
       const sizeScore = c.points.length / total;
       const borderPenalty = c.touchesBorder ? 0.12 : 0;
-      // Distance-from-last-lock dominates the score once something's
-      // tracked, so a real object doesn't get outvoted by a same-instant
-      // larger blob elsewhere (a stray shadow, background noise) -- that
-      // flip-flopping between candidates is what "randomly selecting
-      // different things" looked like before this scoring existed.
-      const dist = lastCentroid
-        ? Math.hypot(centroidOf(c.points).x - lastCentroid.x, centroidOf(c.points).y - lastCentroid.y) / gridDiag
-        : 0;
-      const score = sizeScore - borderPenalty - dist * 1.2;
+      let score = sizeScore - borderPenalty;
+      if (lastCentroid) {
+        // Distance-from-last-lock dominates the score once something's
+        // tracked, so a real object doesn't get outvoted by a same-instant
+        // larger blob elsewhere (a stray shadow, background noise) -- that
+        // flip-flopping between candidates is what "randomly selecting
+        // different things" looked like before this scoring existed.
+        const dist = Math.hypot(centroidOf(c.points).x - lastCentroid.x, centroidOf(c.points).y - lastCentroid.y) / gridDiag;
+        const sizeRatio = lastSize ? Math.min(sizeScore, lastSize) / Math.max(sizeScore, lastSize) : 1;
+        const sizeMismatchPenalty = (1 - sizeRatio) * 0.5;
+        score = sizeScore - borderPenalty - dist * 1.2 - sizeMismatchPenalty;
+      }
       if (score > bestScore) { bestScore = score; best = c; }
     }
     return best.points;
@@ -349,6 +360,8 @@ import { GestureDetectorSystem } from "./gestures/detector.js";
     if (!backgroundGrayGrid || video.readyState < 2) {
       lastOutlineHull = null;
       lastOutlineCentroid = null;
+      lastOutlineSize = null;
+      outlineLostStreak = 0;
       return;
     }
     const currentGray = computeGrayGrid(video);
@@ -362,13 +375,24 @@ import { GestureDetectorSystem } from "./gestures/detector.js";
     // rather than just whatever's biggest this instant (see
     // pickObjectComponent for why: that's what stops it flickering between
     // different regions).
-    const component = pickObjectComponent(mask, OUTLINE_GRID_W, OUTLINE_GRID_H, lastOutlineCentroid);
+    const component = pickObjectComponent(mask, OUTLINE_GRID_W, OUTLINE_GRID_H, lastOutlineCentroid, lastOutlineSize);
     if (component) {
       lastOutlineCentroid = centroidOf(component);
+      lastOutlineSize = component.length / (OUTLINE_GRID_W * OUTLINE_GRID_H);
       lastOutlineHull = convexHull(component);
+      outlineLostStreak = 0;
     } else {
-      lastOutlineCentroid = null;
-      lastOutlineHull = null;
+      // A momentary miss (a hand fully covering the object for a frame or
+      // two, a flash of glare) shouldn't forget the lock -- keep drawing the
+      // last known outline for a short grace period, since instantly
+      // dropping it just lets whatever's picked up next (a different object)
+      // become the new lock. Only give up after a sustained gap.
+      outlineLostStreak++;
+      if (outlineLostStreak > OUTLINE_LOCK_GRACE_FRAMES) {
+        lastOutlineCentroid = null;
+        lastOutlineSize = null;
+        lastOutlineHull = null;
+      }
     }
   }
 
