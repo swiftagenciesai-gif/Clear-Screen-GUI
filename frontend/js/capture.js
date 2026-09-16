@@ -200,40 +200,45 @@ import { GestureDetectorSystem } from "./gestures/detector.js";
   }
 
   // Picks which connected component is "the object", rather than blindly
-  // taking whatever's biggest this frame:
-  //  - rejects anything touching the frame border (a webcam's auto-exposure
-  //    reacting to lighting changes, or an unmasked forearm segment, tends
-  //    to show up as noise attached to an edge -- the actual object should
-  //    be fully inside the frame)
-  //  - rejects anything covering most of the frame (a global brightness/
-  //    white-balance shift showing up as "everything is different")
-  //  - once something is locked on, strongly prefers whatever's closest to
-  //    where it was last frame over whatever's technically largest this
-  //    frame -- this is what stops the outline from flickering between
-  //    different regions frame to frame ("selecting random things") when
-  //    two candidate blobs are briefly similar in size.
+  // taking whatever's biggest this frame. Border-touching and near-full-
+  // frame candidates get a score *penalty*, not a hard rejection -- an
+  // earlier version hard-rejected both, which correctly filtered out
+  // lighting-artifact noise but also blocked perfectly legitimate large or
+  // tightly-framed objects, so nothing ever got drawn. A real, well-framed
+  // object should still win even while touching an edge or filling most of
+  // the frame, as long as it's clearly the best candidate available.
+  //  - only a candidate covering virtually the *entire* frame (a global
+  //    exposure/white-balance shift, not a real object) is rejected outright
+  //  - once something is locked on, prefers whatever's closest to where it
+  //    was last frame over whatever's technically largest this frame, so a
+  //    same-instant larger blob elsewhere doesn't steal the lock.
   function pickObjectComponent(mask, gw, gh, lastCentroid) {
     const total = gw * gh;
     const minFraction = OUTLINE_MIN_COMPONENT_FRACTION;
-    const maxFraction = 0.6;
+    const maxFraction = 0.97; // reject only "virtually the whole frame changed"
     const candidates = getAllComponents(mask, gw, gh).filter((c) => {
       const frac = c.points.length / total;
-      return frac >= minFraction && frac <= maxFraction && !c.touchesBorder;
+      return frac >= minFraction && frac <= maxFraction;
     });
     if (!candidates.length) return null;
 
-    if (lastCentroid) {
-      const gridDiag = Math.hypot(gw, gh);
-      let best = null, bestScore = -Infinity;
-      for (const c of candidates) {
-        const cen = centroidOf(c.points);
-        const dist = Math.hypot(cen.x - lastCentroid.x, cen.y - lastCentroid.y) / gridDiag;
-        const score = c.points.length / total - dist * 2.5; // distance dominates size
-        if (score > bestScore) { bestScore = score; best = c; }
-      }
-      return best.points;
+    const gridDiag = Math.hypot(gw, gh);
+    let best = null, bestScore = -Infinity;
+    for (const c of candidates) {
+      const sizeScore = c.points.length / total;
+      const borderPenalty = c.touchesBorder ? 0.12 : 0;
+      // Distance-from-last-lock dominates the score once something's
+      // tracked, so a real object doesn't get outvoted by a same-instant
+      // larger blob elsewhere (a stray shadow, background noise) -- that
+      // flip-flopping between candidates is what "randomly selecting
+      // different things" looked like before this scoring existed.
+      const dist = lastCentroid
+        ? Math.hypot(centroidOf(c.points).x - lastCentroid.x, centroidOf(c.points).y - lastCentroid.y) / gridDiag
+        : 0;
+      const score = sizeScore - borderPenalty - dist * 1.2;
+      if (score > bestScore) { bestScore = score; best = c; }
     }
-    return candidates.reduce((a, b) => (b.points.length > a.points.length ? b : a)).points;
+    return best.points;
   }
 
   function hullCross(o, a, b) {

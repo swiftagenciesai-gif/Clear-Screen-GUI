@@ -394,14 +394,18 @@ recognition.** It draws the convex hull of whatever's different from the
 background plate you captured, after erasing a disk around each detected
 hand landmark plus a corridor from the wrist toward the nearest frame edge
 (approximating the forearm, which MediaPipe doesn't track) so a held object
-doesn't just get lumped in with your hand/arm as one blob. It rejects
-candidate regions that touch the frame border (usually a lighting artifact
-or an unmasked bit of arm, not the object) or that cover most of the frame
-(a global exposure/white-balance shift, not an actual change), and once it's
-picked something, it favors staying with whatever's closest to that same
-spot next frame over jumping to whatever's technically largest -- that's
-what keeps it from flickering between different regions. None of that makes
-it object recognition, though: it isn't aware of what the object *is*, only
+doesn't just get lumped in with your hand/arm as one blob. Candidate regions
+that touch the frame border get a soft penalty rather than being rejected
+outright (a border-hugging region is usually a lighting artifact or an
+unmasked bit of arm, but a legitimately large or tightly-framed object can
+touch an edge too, and should still win when it's clearly the best
+candidate); only a region covering virtually the *entire* frame -- a global
+exposure/white-balance shift, not an actual object -- gets thrown out
+completely. Once it's picked something, it favors staying with whatever's
+closest to that same spot next frame over jumping to whatever's technically
+largest -- that's what keeps it from flickering between different regions.
+None of that makes it object recognition, though: it isn't aware of what
+the object *is*, only
 that something changed from the empty background near your hand. A second
 object elsewhere in frame, a shadow that moves as you rotate the turntable,
 or a background that isn't actually static can still show up as part of (or
