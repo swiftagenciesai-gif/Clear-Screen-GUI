@@ -5,6 +5,35 @@ import { GestureDetectorSystem } from "./gestures/detector.js";
 
 const $ = (id) => document.getElementById(id);
 
+// Always-visible on-page debug panel: this app is used and debugged over a
+// screenshot-relay more often than an actual attached devtools session, so
+// diagnostics need to show up on the page itself, not just in the console.
+const debugLines = [];
+function initDebugPanel() {
+  const el = document.createElement("div");
+  el.id = "debug-panel";
+  el.style.cssText =
+    "position:fixed;left:12px;bottom:12px;z-index:40;max-width:480px;max-height:40vh;overflow-y:auto;" +
+    "background:rgba(5,7,12,0.88);color:#7fdcff;font:11px/1.4 'Courier New',monospace;" +
+    "padding:8px 10px;border-radius:6px;border:1px solid #232c3d;white-space:pre-wrap;pointer-events:none;";
+  document.body.appendChild(el);
+  return el;
+}
+const debugPanel = initDebugPanel();
+function debugLog(msg) {
+  const line = `[${new Date().toISOString().slice(11, 19)}] ${msg}`;
+  debugLines.push(line);
+  if (debugLines.length > 40) debugLines.shift();
+  debugPanel.textContent = debugLines.join("\n");
+  console.log(msg);
+}
+window.addEventListener("error", (e) => {
+  debugLog(`ERROR: ${e.message} (${e.filename}:${e.lineno})`);
+});
+window.addEventListener("unhandledrejection", (e) => {
+  debugLog(`UNHANDLED REJECTION: ${e.reason?.message || e.reason}`);
+});
+
 function showFatalError(title, detail) {
   const el = document.createElement("div");
   el.style.cssText =
@@ -53,7 +82,9 @@ async function boot() {
   // -------------------------------------------------------------------------
 
   const canvas = $("three-canvas");
+  debugLog(`three-canvas element found: ${!!canvas}, client size: ${canvas?.clientWidth}x${canvas?.clientHeight}`);
   const renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: true });
+  debugLog(`WebGLRenderer created. context: ${renderer.getContext() ? "OK" : "NULL"}`);
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   renderer.setClearColor(0x000000, 0); // fully transparent clear -> webcam shows through
 
@@ -97,30 +128,52 @@ async function boot() {
   }
 
   function applyHolographicMaterial(root) {
+    let meshCount = 0;
+    let vertCount = 0;
     root.traverse((obj) => {
       if (!obj.isMesh) return;
+      meshCount++;
+      vertCount += obj.geometry.attributes.position?.count || 0;
       const hasVertexColor = !!obj.geometry.attributes.color;
       const mat = createHolographicMaterial({ hasVertexColor });
       obj.material = mat;
       holoMaterials.push(mat);
     });
+    debugLog(`applyHolographicMaterial: ${meshCount} mesh(es), ${vertCount} total vertices, hasVertexColor varies per-mesh`);
   }
 
   function loadModel(url) {
+    debugLog(`loadModel: fetching ${url}`);
     return new Promise((resolve, reject) => {
       const loader = new GLTFLoader();
       loader.load(
         url,
         (gltf) => {
-          clearModel();
-          applyHolographicMaterial(gltf.scene);
-          gltf.scene.scale.setScalar(BASE_DISPLAY_SIZE);
-          modelRoot.add(gltf.scene);
-          currentGestureScale = 1;
-          resolve(gltf);
+          try {
+            clearModel();
+            applyHolographicMaterial(gltf.scene);
+            gltf.scene.scale.setScalar(BASE_DISPLAY_SIZE);
+            modelRoot.add(gltf.scene);
+            currentGestureScale = 1;
+            debugLog(
+              `loadModel: added to scene. modelRoot children: ${modelRoot.children.length}, ` +
+                `scene children: ${scene.children.length}, holoMaterials: ${holoMaterials.length}`
+            );
+            resolve(gltf);
+          } catch (e) {
+            debugLog(`loadModel onLoad callback threw: ${e.message}`);
+            reject(e);
+          }
         },
-        undefined,
-        reject
+        (progressEvent) => {
+          if (progressEvent.total) {
+            debugLog(`loadModel progress: ${progressEvent.loaded}/${progressEvent.total} bytes`);
+          }
+        },
+        (err) => {
+          debugLog(`loadModel GLTFLoader error: ${err.message || err}`);
+          reject(err);
+        }
       );
     });
   }
@@ -347,10 +400,22 @@ async function boot() {
     document.querySelector("#hands-status .status-dot").className = "status-dot error";
   }
 
+  debugLog(`Starting render loop. camera pos: ${camera.position.toArray().map((v) => v.toFixed(2))}, scene children: ${scene.children.length}`);
   const clock = new THREE.Clock();
+  let frameCount = 0;
+  let lastDebugTime = 0;
   function animate() {
     requestAnimationFrame(animate);
     const t = clock.getElapsedTime();
+    frameCount++;
+    if (t - lastDebugTime > 2) {
+      lastDebugTime = t;
+      debugLog(
+        `frame ${frameCount}, modelRoot children: ${modelRoot.children.length}, ` +
+          `modelRoot scale: ${modelRoot.scale.x.toFixed(2)}, holoMaterials: ${holoMaterials.length}, ` +
+          `canvas size: ${canvas.width}x${canvas.height}`
+      );
+    }
     holoMaterials.forEach((m) => (m.uniforms.time.value = t));
     controls.update();
     renderer.render(scene, camera);
