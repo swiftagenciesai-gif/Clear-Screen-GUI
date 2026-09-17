@@ -162,6 +162,30 @@ main {
   50% { background-color: rgba(20, 40, 15, 0.85); }
 }
 
+/* A camera positioned far from a small object gives every turntable shot
+   almost the same viewpoint despite the visible rotation -- plenty of
+   feature matches, but too little real parallax for COLMAP to triangulate,
+   which silently produces a garbage (often near-flat) reconstruction. Unlike
+   the height reminder this doesn't pause capture (the object's on-screen
+   size can fluctuate near the threshold as the camera is adjusted, so a
+   blocking pause would flicker) -- it's a persistent, non-blocking banner
+   that tracks the live outline detector's own measurement of object size. */
+.framing-prompt {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  right: 8px;
+  padding: 10px 14px;
+  background: rgba(120, 70, 0, 0.85);
+  color: #fff;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.4;
+  text-align: center;
+  border-radius: 6px;
+  pointer-events: none;
+}
+
 .controls-row {
   display: flex;
   gap: 12px;
