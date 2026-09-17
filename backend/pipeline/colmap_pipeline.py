@@ -288,10 +288,22 @@ def run_colmap_pipeline(
             "This usually means too few overlapping views, motion blur, or a "
             "featureless/reflective object. See README troubleshooting section."
         )
+    # COLMAP's mapper can keep several disconnected reconstructions from one
+    # run (e.g. a handful of images that registered early and separately from
+    # the rest) and writes each to output_path/<n>, numbered in the order it
+    # finished them -- NOT ranked by size (verified directly from its own
+    # RunMapper source, exe/sfm.cc). A real scan hit exactly this: model 0
+    # was a 2-image leftover kept before mapper went on to register ~26
+    # images into model 1, and picking model_dirs[0] unconditionally reported
+    # the small one as the result even though a much better one existed right
+    # next to it. Compare every model's own registered-image count instead.
     best_model = model_dirs[0]
-    on_progress("sparse_reconstruction", 1.0, f"Sparse model reconstructed ({best_model.name}).")
-
     registered = _count_registered_images(best_model, colmap_dir, log_fn)
+    for candidate in model_dirs[1:]:
+        candidate_registered = _count_registered_images(candidate, colmap_dir, log_fn)
+        if candidate_registered is not None and (registered is None or candidate_registered > registered):
+            best_model, registered = candidate, candidate_registered
+    on_progress("sparse_reconstruction", 1.0, f"Sparse model reconstructed ({best_model.name}).")
     # The point-count check in _mesh_from_sparse_cpu (>= 50 points) misses
     # exactly this failure mode: a handful of images can still triangulate a
     # few hundred points between just themselves while the rest of the
