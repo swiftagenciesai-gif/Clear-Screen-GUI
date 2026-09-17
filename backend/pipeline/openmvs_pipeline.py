@@ -150,9 +150,20 @@ def run_dense_pipeline(
     on_progress("dense_stereo", 0.1, "OpenMVS scene ready.")
 
     # --- DensifyPointCloud: real dense multi-view stereo, CPU-only --------
+    # Unlike the other tools here, DensifyPointCloud's --gpu-device flag is
+    # compiled in whenever EITHER CUDA or Metal support is enabled (verified
+    # from its actual source), and CMake auto-enables Metal on every macOS
+    # build regardless of any option we pass -- so on any Mac following our
+    # install script, this flag exists and defaults to "-1" (try the best
+    # available GPU automatically, which would mean Metal here). We force
+    # CPU explicitly instead of silently inheriting that: Metal support is
+    # new to this codebase and unverified for our purposes, so a predictable
+    # CPU run is the safer default for now. (RefineMesh's equivalent flag,
+    # by contrast, is gated on CUDA alone -- never pass it there, or it'll
+    # be an unrecognized option on this exact build.)
     on_progress("dense_stereo", 0.15, "Computing a dense point cloud (CPU multi-view stereo -- the slowest step)...")
     t0 = time.time()
-    cmd = [binary("DensifyPointCloud"), "scene.mvs", "-w", str(dense_dir)]
+    cmd = [binary("DensifyPointCloud"), "scene.mvs", "-w", str(dense_dir), "--gpu-device", "-2"]
     _run(
         cmd, dense_dir, log,
         on_idle=_idle_progress(on_progress, "dense_stereo", tau=90, label="Still computing the dense point cloud"),

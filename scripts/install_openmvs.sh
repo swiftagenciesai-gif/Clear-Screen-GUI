@@ -46,22 +46,38 @@ if [[ ! -d vcglib ]]; then
   git clone --depth 1 https://github.com/cdcseacave/VCG.git vcglib
 fi
 
-# TinyEXIF (another OpenMVS dependency with no Homebrew package) is a real
-# CMake package, unlike VCG which OpenMVS just points at as a raw source
-# tree -- it has to actually be built and installed so its
-# TinyEXIFConfig.cmake exists somewhere OpenMVS's own find_package() call
-# can see, hence the separate local install prefix below.
+# TinyEXIF, TinyNPY, and PoseLib (more OpenMVS dependencies with no Homebrew
+# package -- normally installed via vcpkg, which this script deliberately
+# avoids in favor of Homebrew) are real CMake packages, unlike VCG which
+# OpenMVS just points at as a raw source tree -- each has to actually be
+# built and installed so its <Name>Config.cmake exists somewhere OpenMVS's
+# own find_package() calls can see, hence the separate local install prefix
+# below. All three are REQUIRED in OpenMVS's SFM module (confirmed by
+# reading libs/SFM/CMakeLists.txt on OpenMVS's actual default branch,
+# "develop" -- not "master", which is a separate, less current branch that
+# doesn't even have this module).
 LOCAL_PREFIX="$WORK_DIR/local"
-if [[ ! -f "$LOCAL_PREFIX/lib/cmake/TinyEXIF/TinyEXIFConfig.cmake" ]]; then
-  if [[ ! -d TinyEXIF ]]; then
-    echo "==> Cloning TinyEXIF (an OpenMVS dependency with no Homebrew package)..."
-    git clone --depth 1 https://github.com/cdcseacave/TinyEXIF.git
+build_local_cmake_dep() {
+  local repo="$1" name="$2"; shift 2
+  if [[ -f "$LOCAL_PREFIX/lib/cmake/$name/${name}Config.cmake" ]]; then
+    return
   fi
-  echo "==> Building and installing TinyEXIF into $LOCAL_PREFIX..."
-  cmake -S TinyEXIF -B TinyEXIF/build -DCMAKE_INSTALL_PREFIX="$LOCAL_PREFIX" -DBUILD_SHARED_LIBS=OFF
-  cmake --build TinyEXIF/build --config Release
-  cmake --install TinyEXIF/build
-fi
+  if [[ ! -d "$name" ]]; then
+    echo "==> Cloning $name (an OpenMVS dependency with no Homebrew package)..."
+    git clone --depth 1 "$repo" "$name"
+  fi
+  echo "==> Building and installing $name into $LOCAL_PREFIX..."
+  cmake -S "$name" -B "$name/build" -DCMAKE_INSTALL_PREFIX="$LOCAL_PREFIX" -DBUILD_SHARED_LIBS=OFF "$@"
+  cmake --build "$name/build" --config Release
+  cmake --install "$name/build"
+}
+build_local_cmake_dep "https://github.com/cdcseacave/TinyEXIF.git" "TinyEXIF"
+build_local_cmake_dep "https://github.com/cdcseacave/TinyNPY.git" "TinyNPY"
+# WERROR defaults ON upstream (treats every compiler warning as a build
+# failure) -- turned off since AppleClang 21 is newer than this library's
+# authors tested against, and a new pedantic warning shouldn't be allowed to
+# block an otherwise-working build.
+build_local_cmake_dep "https://github.com/PoseLib/PoseLib.git" "PoseLib" -DWERROR=OFF
 
 if [[ ! -d openMVS ]]; then
   echo "==> Cloning OpenMVS..."
