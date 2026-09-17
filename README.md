@@ -466,7 +466,13 @@ initial guess COLMAP refines as it goes). The fix is capture technique, not
 a setting: vary the camera's height or tilt across the sequence -- roughly a
 third of shots angled down from above, a third level, a third angled up from
 below -- rather than one perfectly flat sweep. That's the difference between
-a recognizable 3D shape and a flat blob from the exact same object.
+a recognizable 3D shape and a flat blob from the exact same object. Saying
+this once in the instructions text at the top of the page wasn't enough to
+actually change people's capture habits mid-scan, so the capture flow now
+pauses itself every 6 shots with an unmissable on-video banner (auto-capture
+included -- it holds off the next shot until you've had a few seconds to
+react) telling you to change height/tilt right now, not just reminding you
+once at the start.
 
 **The coverage ring is a capture-count guide, not real angle estimation.**
 It assumes each shot is one even rotation step of a full 360-degree turn; it

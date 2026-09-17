@@ -135,6 +135,33 @@ main {
   pointer-events: none;
 }
 
+/* A constant camera height around the object reconstructs as a flat,
+   "2D-looking" sheet -- there's no vertical parallax to triangulate the top
+   and bottom surfaces from. Static instructions at the top of the page
+   weren't enough to stop that from happening in practice, so this pauses
+   auto-capture and puts the reminder directly over the shot itself,
+   impossible to miss mid-capture. */
+.height-prompt {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 24px;
+  background: rgba(10, 20, 10, 0.72);
+  color: #fff;
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1.5;
+  pointer-events: none;
+  animation: heightPromptPulse 1s ease-in-out infinite;
+}
+@keyframes heightPromptPulse {
+  0%, 100% { background-color: rgba(10, 20, 10, 0.72); }
+  50% { background-color: rgba(20, 40, 15, 0.85); }
+}
+
 .controls-row {
   display: flex;
   gap: 12px;

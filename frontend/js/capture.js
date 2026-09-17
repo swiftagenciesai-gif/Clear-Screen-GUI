@@ -22,6 +22,16 @@ import { GestureDetectorSystem } from "./gestures/detector.js";
   const OUTLINE_MIN_COMPONENT_FRACTION = 0.01; // ignore blobs smaller than 1% of the grid as noise
   const OUTLINE_LOCK_GRACE_FRAMES = 20; // ~0.3-0.6s of missed detections before a lock is considered truly lost
 
+  // A turntable spin at one constant camera height reconstructs as a
+  // flattened, "2D-looking" sheet -- every shot's camera ray lies in
+  // roughly the same horizontal plane, so there's no vertical parallax to
+  // triangulate the top/bottom surfaces from. Saying so once in the
+  // instructions text at the top of the page wasn't enough to actually stop
+  // people from shooting a flat sequence anyway, so this forces a real,
+  // hard-to-miss pause partway through capture instead.
+  const HEIGHT_PROMPT_EVERY = 6; // remind roughly every 1/6 of the target shots
+  const HEIGHT_PROMPT_PAUSE_MS = 4000;
+
   const COLMAP_STEPS = [
     "masking", "feature_extraction", "matching", "sparse_reconstruction",
     "undistortion", "dense_stereo", "stereo_fusion", "meshing", "texturing", "mesh_export",
@@ -47,6 +57,7 @@ import { GestureDetectorSystem } from "./gestures/detector.js";
   let outlineLostStreak = 0; // consecutive frames with no matching candidate since the last lock
   let latestHandLandmarks = []; // most recent frame's hands, each a 21-point landmark array in raw (unmirrored) video-normalized coords
   let handDetectorStarted = false;
+  let heightPromptActive = false;
 
   // ---------- Camera setup ----------------------------------------------------
 
@@ -721,6 +732,23 @@ import { GestureDetectorSystem } from "./gestures/detector.js";
     }
   }
 
+  // Every HEIGHT_PROMPT_EVERY shots, force a real pause with an unmissable
+  // on-video banner reminding the user to actually change camera height/
+  // tilt now -- not just at the very start, throughout the whole capture --
+  // since that's what a non-flat reconstruction actually depends on.
+  function maybeShowHeightPrompt() {
+    if (shots.length === 0 || shots.length >= TARGET_SHOTS) return;
+    if (shots.length % HEIGHT_PROMPT_EVERY !== 0) return;
+    heightPromptActive = true;
+    const heightPromptEl = $("height-prompt");
+    heightPromptEl.textContent = "\u{1F4D0} Raise, lower, or tilt the camera now, then keep going -- a constant height makes a flat scan.";
+    heightPromptEl.style.display = "flex";
+    setTimeout(() => {
+      heightPromptEl.style.display = "none";
+      heightPromptActive = false;
+    }, HEIGHT_PROMPT_PAUSE_MS);
+  }
+
   async function captureShot() {
     const canvas = grabFrameCanvas();
     const sharpness = estimateSharpness(canvas);
@@ -729,6 +757,7 @@ import { GestureDetectorSystem } from "./gestures/detector.js";
     renderThumbs();
     updateStats();
     flashCapture();
+    maybeShowHeightPrompt();
   }
 
   function flashCapture() {
@@ -778,11 +807,12 @@ import { GestureDetectorSystem } from "./gestures/detector.js";
     countdownEl.style.display = "flex";
     nextCaptureAt = performance.now() + intervalSec * 1000;
     lastWholeSecond = -1;
-    autoTimer = setInterval(() => {
+    autoTimer = setInterval(async () => {
+      if (heightPromptActive) return; // paused for the on-video height-change reminder
       updateCountdownOverlay();
       if (performance.now() >= nextCaptureAt) {
-        captureShot();
-        nextCaptureAt = performance.now() + intervalSec * 1000;
+        await captureShot(); // may set heightPromptActive before resolving
+        nextCaptureAt = performance.now() + (heightPromptActive ? HEIGHT_PROMPT_PAUSE_MS : 0) + intervalSec * 1000;
         lastWholeSecond = -1;
       }
     }, 100);
