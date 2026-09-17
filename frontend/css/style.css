@@ -1,0 +1,284 @@
+:root {
+  --bg: #0a0e14;
+  --panel: #121826;
+  --panel-border: #232c3d;
+  --accent: #33e0ff;
+  --accent-dim: #1c7d90;
+  --good: #3ddc84;
+  --warn: #ffb020;
+  --bad: #ff4d6d;
+  --text: #e7edf5;
+  --text-dim: #8a96ab;
+  font-family: 'Segoe UI', Roboto, -apple-system, sans-serif;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: radial-gradient(ellipse at top, #101827 0%, #05070c 70%);
+  color: var(--text);
+  min-height: 100vh;
+}
+
+header.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 24px;
+  border-bottom: 1px solid var(--panel-border);
+  background: rgba(10, 14, 20, 0.8);
+  backdrop-filter: blur(6px);
+  position: sticky;
+  top: 0;
+  z-index: 20;
+}
+
+header.topbar h1 {
+  font-size: 16px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin: 0;
+}
+
+header.topbar nav a {
+  color: var(--text-dim);
+  text-decoration: none;
+  margin-left: 20px;
+  font-size: 14px;
+}
+header.topbar nav a.active, header.topbar nav a:hover { color: var(--accent); }
+
+main {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 24px;
+}
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: 12px;
+  padding: 20px;
+  margin-bottom: 20px;
+}
+
+.panel h2 {
+  margin-top: 0;
+  font-size: 15px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-dim);
+}
+
+.btn {
+  background: linear-gradient(180deg, #1c2740, #131b2c);
+  border: 1px solid var(--panel-border);
+  color: var(--text);
+  padding: 10px 18px;
+  border-radius: 8px;
+  font-size: 14px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.btn.primary { background: linear-gradient(180deg, var(--accent-dim), #0d4552); border-color: var(--accent); color: #fff; }
+.btn.primary:hover:not(:disabled) { background: linear-gradient(180deg, var(--accent), var(--accent-dim)); }
+.btn.danger { border-color: var(--bad); color: var(--bad); background: transparent; }
+.btn.recording { border-color: var(--bad); color: #fff; background: var(--bad); animation: recordPulse 1.2s ease-in-out infinite; }
+@keyframes recordPulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.6; } }
+
+.video-wrap {
+  position: relative;
+  width: 100%;
+  max-width: 720px;
+  margin: 0 auto;
+  border-radius: 12px;
+  overflow: hidden;
+  border: 1px solid var(--panel-border);
+  background: #000;
+}
+.video-wrap video, .video-wrap canvas.overlay {
+  width: 100%;
+  display: block;
+}
+.countdown-overlay {
+  position: absolute;
+  top: 12px; right: 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  border-radius: 30px;
+  background: rgba(5, 7, 12, 0.75);
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  font-size: 15px;
+  font-weight: 600;
+  pointer-events: none;
+  transition: transform 0.1s ease;
+}
+.countdown-overlay.tick {
+  transform: scale(1.08);
+}
+.countdown-overlay .num {
+  font-size: 22px;
+  font-variant-numeric: tabular-nums;
+  min-width: 1.2em;
+  text-align: center;
+}
+.video-wrap canvas.overlay {
+  position: absolute;
+  top: 0; left: 0;
+  pointer-events: none;
+}
+
+/* A constant camera height around the object reconstructs as a flat,
+   "2D-looking" sheet -- there's no vertical parallax to triangulate the top
+   and bottom surfaces from. Static instructions at the top of the page
+   weren't enough to stop that from happening in practice, so this pauses
+   auto-capture and puts the reminder directly over the shot itself,
+   impossible to miss mid-capture. */
+.height-prompt {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 24px;
+  background: rgba(10, 20, 10, 0.72);
+  color: #fff;
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1.5;
+  pointer-events: none;
+  animation: heightPromptPulse 1s ease-in-out infinite;
+}
+@keyframes heightPromptPulse {
+  0%, 100% { background-color: rgba(10, 20, 10, 0.72); }
+  50% { background-color: rgba(20, 40, 15, 0.85); }
+}
+
+.controls-row {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  justify-content: center;
+  margin-top: 16px;
+  flex-wrap: wrap;
+}
+
+.stat {
+  text-align: center;
+}
+.stat .value { font-size: 28px; font-weight: 600; color: var(--accent); }
+.stat .label { font-size: 11px; text-transform: uppercase; color: var(--text-dim); letter-spacing: 0.05em; }
+
+.stats-row { display: flex; gap: 32px; justify-content: center; margin: 16px 0; }
+
+.thumb-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(90px, 1fr));
+  gap: 8px;
+  margin-top: 16px;
+}
+.thumb {
+  position: relative;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 2px solid var(--panel-border);
+  aspect-ratio: 4/3;
+}
+.thumb.blurry { border-color: var(--warn); }
+.thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.thumb .idx { position: absolute; top: 2px; left: 4px; font-size: 11px; background: rgba(0,0,0,0.6); padding: 1px 5px; border-radius: 4px; }
+.thumb .del {
+  position: absolute; top: 2px; right: 2px; width: 20px; height: 20px;
+  background: rgba(0,0,0,0.7); color: var(--bad); border: none; border-radius: 4px;
+  cursor: pointer; font-size: 12px; line-height: 1;
+}
+.thumb .blur-badge {
+  position: absolute; bottom: 2px; left: 2px; right: 2px; font-size: 9px;
+  background: rgba(255, 176, 32, 0.85); color: #201400; padding: 1px 3px; border-radius: 3px;
+  text-align: center;
+}
+
+.progress-bar-outer {
+  width: 100%;
+  height: 10px;
+  background: #0d1320;
+  border-radius: 6px;
+  overflow: hidden;
+  border: 1px solid var(--panel-border);
+}
+.progress-bar-inner {
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent-dim), var(--accent));
+  width: 0%;
+  transition: width 0.4s ease;
+}
+
+.status-line { display: flex; justify-content: space-between; font-size: 13px; color: var(--text-dim); margin-top: 8px; }
+.status-line strong { color: var(--text); }
+
+.log-box {
+  background: #05070c;
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  padding: 10px;
+  height: 160px;
+  overflow-y: auto;
+  font-family: 'Courier New', monospace;
+  font-size: 11px;
+  color: #7fdcff;
+  margin-top: 12px;
+  white-space: pre-wrap;
+}
+
+.badge {
+  display: inline-block;
+  padding: 3px 10px;
+  border-radius: 20px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.badge.state-created, .badge.state-uploading { background: #2b3550; color: #9db4e0; }
+.badge.state-queued { background: #443a1f; color: var(--warn); }
+.badge.state-running { background: #123a4a; color: var(--accent); }
+.badge.state-done { background: #123a28; color: var(--good); }
+.badge.state-error { background: #401821; color: var(--bad); }
+
+.hint { color: var(--text-dim); font-size: 13px; line-height: 1.5; }
+.hint code { background: #05070c; padding: 1px 6px; border-radius: 4px; }
+
+.scan-list { display: flex; flex-direction: column; gap: 8px; }
+.scan-row {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 10px 14px; background: #0d1320; border-radius: 8px; border: 1px solid var(--panel-border);
+}
+.scan-row .id { font-family: monospace; font-size: 13px; color: var(--text-dim); }
+
+.step-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.step-pill {
+  font-size: 11px; padding: 4px 10px; border-radius: 20px; background: #0d1320;
+  border: 1px solid var(--panel-border); color: var(--text-dim);
+}
+.step-pill.active { border-color: var(--accent); color: var(--accent); }
+.step-pill.done { border-color: var(--good); color: var(--good); }
+
+@media (max-width: 700px) {
+  header.topbar { padding: 10px 14px; }
+  header.topbar h1 { font-size: 13px; }
+  header.topbar nav a { margin-left: 10px; font-size: 12px; }
+  main { padding: 12px; }
+  .panel { padding: 14px; }
+  .stats-row { gap: 16px; flex-wrap: wrap; }
+  .controls-row { gap: 8px; }
+  .btn { padding: 10px 14px; font-size: 13px; }
+  .countdown-overlay { top: 8px; right: 8px; padding: 6px 12px; font-size: 12px; }
+  .countdown-overlay .num { font-size: 16px; }
+}

@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>3D Scan Capture</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ccircle cx='50' cy='50' r='40' fill='none' stroke='%2333e0ff' stroke-width='8'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<header class="topbar">
+  <h1>&#9679; 3D Scan Capture</h1>
+  <nav>
+    <a href="index.html" class="active">Capture</a>
+    <a href="viewer.html">Viewer</a>
+  </nav>
+</header>
+
+<main>
+
+  <div class="panel" id="setup-panel">
+    <h2>1. Camera Setup</h2>
+    <p class="hint">
+      Grant camera access, then place your object on a plain, non-reflective turntable
+      or lazy-susan in even, diffuse lighting (avoid direct sun/hard shadows &mdash; they
+      confuse feature matching). Leave ~1m clearance around the object so the camera can
+      stay at a fixed distance while it rotates.
+    </p>
+    <div class="video-wrap">
+      <video id="video" autoplay playsinline muted></video>
+      <canvas id="overlay" class="overlay"></canvas>
+      <div id="countdown-overlay" class="countdown-overlay" style="display:none;"></div>
+      <div id="height-prompt" class="height-prompt" style="display:none;"></div>
+    </div>
+    <div class="controls-row">
+      <button class="btn primary" id="btn-start-cam">Enable Camera</button>
+      <select id="camera-select" style="display:none"></select>
+    </div>
+  </div>
+
+  <div class="panel" id="bg-panel" style="display:none">
+    <h2>2. Background Plate</h2>
+    <p class="hint">
+      Remove the object from the frame (keep the camera and turntable exactly where they'll
+      be during capture) and take one clean shot of the empty background. The backend uses
+      this to automatically mask the object out from the background in every photo, which
+      substantially improves reconstruction quality. It also unlocks a live outline overlay
+      on the video below, right after you place the object back in frame, so you can see
+      exactly what the app will treat as "the object" before you take any photos or start
+      recording.
+    </p>
+    <div class="controls-row">
+      <button class="btn primary" id="btn-capture-bg">Capture Background</button>
+      <span id="bg-status" class="hint"></span>
+    </div>
+  </div>
+
+  <div class="panel" id="capture-panel" style="display:none">
+    <h2>3. Turntable Capture</h2>
+    <p class="hint">
+      Place the object back in frame. After each shot, rotate it a small, even amount
+      (~<span id="deg-per-shot">10</span>&deg;) and capture again, working all the way
+      around a full 360&deg; turn. Aim for <span id="target-shots-label">36</span> shots
+      minimum; more is better for fine detail.
+    </p>
+    <p class="hint" style="color: var(--warn);">
+      <strong>Important:</strong> don't keep the camera at one fixed height/angle the whole
+      way around &mdash; a pure flat turntable spin is a classic weak case for 3D
+      reconstruction and tends to produce a flattened, "2D-looking" result. Instead, vary
+      the camera's height or tilt as you go: capture roughly a third of your shots angled
+      slightly down from above, a third level with the object, and a third angled slightly
+      up from below. That real viewpoint variation is what gives the reconstruction actual
+      depth to work with.
+    </p>
+
+    <div class="stats-row">
+      <div class="stat"><div class="value" id="shot-count">0</div><div class="label">Shots</div></div>
+      <div class="stat"><div class="value" id="coverage-pct">0%</div><div class="label">Coverage</div></div>
+      <div class="stat"><div class="value" id="blur-count">0</div><div class="label">Flagged blurry</div></div>
+    </div>
+
+    <div class="controls-row">
+      <button class="btn primary" id="btn-capture-shot">Capture Shot (Space)</button>
+      <button class="btn" id="btn-auto-toggle">Start Auto-Capture</button>
+      <label class="hint" style="display:flex;align-items:center;gap:6px;">
+        Interval
+        <input type="number" id="auto-interval" value="2" min="1" max="10" step="0.5" style="width:50px">s
+      </label>
+    </div>
+
+    <div class="controls-row" style="margin-top:16px;padding-top:16px;border-top:1px solid var(--panel-border);">
+      <button class="btn primary" id="btn-record-toggle">&#9210; Start Recording</button>
+      <span class="hint" id="record-status">Rotate the object smoothly while recording, then frames are pulled out automatically.</span>
+    </div>
+    <div class="controls-row">
+      <span class="hint" id="voice-status">Voice control starts once you enable the camera (step 1).</span>
+    </div>
+
+    <div id="thumbs" class="thumb-grid"></div>
+  </div>
+
+  <div class="panel" id="upload-panel" style="display:none">
+    <h2>4. Reconstruct</h2>
+    <div class="controls-row">
+      <button class="btn primary" id="btn-upload-process">Upload &amp; Start Reconstruction</button>
+      <select id="engine-select">
+        <option value="auto">Engine: Auto-detect</option>
+        <option value="colmap">Engine: Force COLMAP</option>
+        <option value="meshroom">Engine: Force Meshroom</option>
+      </select>
+    </div>
+
+    <div id="processing-status" style="display:none; margin-top:16px;">
+      <div class="status-line">
+        <span>Status: <span class="badge" id="state-badge">created</span></span>
+        <strong id="progress-pct">0%</strong>
+      </div>
+      <div class="progress-bar-outer"><div class="progress-bar-inner" id="progress-bar"></div></div>
+      <div class="status-line"><span id="status-message">&nbsp;</span></div>
+      <div class="step-list" id="step-list"></div>
+      <div class="log-box" id="log-box"></div>
+      <div class="controls-row" id="done-actions" style="display:none;">
+        <a class="btn primary" id="btn-view" href="#">View in 3D Gesture Viewer &rarr;</a>
+      </div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>Previous Scans</h2>
+    <div class="scan-list" id="scan-list"><p class="hint">Loading&hellip;</p></div>
+  </div>
+
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+<script type="module" src="js/capture.js"></script>
+</body>
+</html>

@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+node_modules/
+backend/scans/*
+!backend/scans/.gitkeep
+*.log
+.DS_Store
+certs/
