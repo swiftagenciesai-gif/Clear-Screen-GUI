@@ -46,6 +46,23 @@ if [[ ! -d vcglib ]]; then
   git clone --depth 1 https://github.com/cdcseacave/VCG.git vcglib
 fi
 
+# TinyEXIF (another OpenMVS dependency with no Homebrew package) is a real
+# CMake package, unlike VCG which OpenMVS just points at as a raw source
+# tree -- it has to actually be built and installed so its
+# TinyEXIFConfig.cmake exists somewhere OpenMVS's own find_package() call
+# can see, hence the separate local install prefix below.
+LOCAL_PREFIX="$WORK_DIR/local"
+if [[ ! -f "$LOCAL_PREFIX/lib/cmake/TinyEXIF/TinyEXIFConfig.cmake" ]]; then
+  if [[ ! -d TinyEXIF ]]; then
+    echo "==> Cloning TinyEXIF (an OpenMVS dependency with no Homebrew package)..."
+    git clone --depth 1 https://github.com/cdcseacave/TinyEXIF.git
+  fi
+  echo "==> Building and installing TinyEXIF into $LOCAL_PREFIX..."
+  cmake -S TinyEXIF -B TinyEXIF/build -DCMAKE_INSTALL_PREFIX="$LOCAL_PREFIX" -DBUILD_SHARED_LIBS=OFF
+  cmake --build TinyEXIF/build --config Release
+  cmake --install TinyEXIF/build
+fi
+
 if [[ ! -d openMVS ]]; then
   echo "==> Cloning OpenMVS..."
   git clone --depth 1 https://github.com/cdcseacave/openMVS.git
@@ -59,8 +76,11 @@ echo "    default clang has no OpenMP support without extra setup this script sk
 cmake ../openMVS \
   -DCMAKE_BUILD_TYPE=Release \
   -DVCG_ROOT="$WORK_DIR/vcglib" \
+  -DCMAKE_PREFIX_PATH="$LOCAL_PREFIX" \
   -DOpenMVS_USE_CUDA=OFF \
   -DOpenMVS_USE_OPENMP=OFF \
+  -DOpenMVS_BUILD_VIEWER=OFF \
+  -DOpenMVS_ENABLE_TESTS=OFF \
   -G "Unix Makefiles"
 
 echo "==> Building (this is the slow part -- 15-45 minutes is normal)..."
