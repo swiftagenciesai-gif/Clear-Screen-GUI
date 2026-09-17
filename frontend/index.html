@@ -97,6 +97,16 @@
       <span class="hint" id="voice-status">Voice control starts once you enable the camera (step 1).</span>
     </div>
 
+    <div class="controls-row" style="margin-top:16px;padding-top:16px;border-top:1px solid var(--panel-border);">
+      <button class="btn" id="btn-recapture-bg">Recapture Background</button>
+      <span class="hint" id="recapture-bg-status">
+        Moved the camera (e.g. to fix the framing warning above)? The live outline is now
+        comparing against the wrong pixels. Remove the object and hit this to resync --
+        any shots already taken were captured against the old position, though, so retake
+        those too if you moved the camera before hitting this.
+      </span>
+    </div>
+
     <div id="thumbs" class="thumb-grid"></div>
   </div>
 

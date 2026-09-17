@@ -702,20 +702,43 @@ import { GestureDetectorSystem } from "./gestures/detector.js";
 
   // ---------- Background step -----------------------------------------------
 
-  $("btn-capture-bg").addEventListener("click", async () => {
+  // Background subtraction only works while the camera stays exactly where
+  // it was when this ran -- moving the camera afterward (e.g. to fix the
+  // framing warning above, which itself only appears once an object is
+  // placed back in frame, i.e. after this step) shifts every pixel out from
+  // under the stored reference and breaks the live outline. Rather than
+  // trying to make masking camera-position-independent -- which would throw
+  // away exactly the thing that lets it filter out the static, zero-parallax
+  // background clutter this app's fixed-camera/rotating-object setup would
+  // otherwise hand COLMAP -- this is factored out so it can be re-run at any
+  // time via "Recapture Background" below, cheaply resyncing after a move.
+  async function captureBackground(statusEl) {
     const canvas = grabFrameCanvas();
     backgroundBlob = await canvasToBlob(canvas);
-    $("bg-status").textContent = "Measuring background (hold still for a moment)...";
+    statusEl.textContent = "Measuring background (hold still for a moment)...";
     const { colorGrid, noiseLevel } = await sampleBackgroundColorGrid(OUTLINE_BG_SAMPLE_FRAMES);
     backgroundColorGrid = colorGrid;
     outlineDiffThreshold = Math.max(
       OUTLINE_MIN_THRESHOLD,
       Math.min(OUTLINE_MAX_THRESHOLD, noiseLevel * OUTLINE_THRESHOLD_MULTIPLIER)
     );
+  }
+
+  $("btn-capture-bg").addEventListener("click", async () => {
+    await captureBackground($("bg-status"));
     $("bg-status").textContent = "Background captured ✓ -- live object outline is now active below.";
     $("capture-panel").style.display = "block";
     $("deg-per-shot").textContent = Math.round(360 / TARGET_SHOTS);
     $("target-shots-label").textContent = TARGET_SHOTS;
+  });
+
+  $("btn-recapture-bg").addEventListener("click", async () => {
+    const statusEl = $("recapture-bg-status");
+    statusEl.textContent = "Remove the object from frame, then hold still...";
+    await new Promise((r) => setTimeout(r, 2000)); // give them a moment to actually clear the frame
+    await captureBackground(statusEl);
+    statusEl.textContent = "Background resynced ✓ -- any shots already taken were captured against the " +
+      "old camera position, though, so retake those if you moved the camera before hitting this.";
   });
 
   // ---------- Turntable capture -----------------------------------------------
