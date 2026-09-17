@@ -30,6 +30,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 from typing import Callable
@@ -112,6 +113,43 @@ def _parse_fraction(line: str) -> float | None:
                 num, denom = groups[0], groups[1]
             if denom > 0:
                 return max(0.0, min(1.0, num / denom))
+    return None
+
+
+_NUM_IMAGES_RE = re.compile(r"# Number of images:\s*(\d+)")
+
+
+def _count_registered_images(
+    model_dir: Path, colmap_dir: Path, log_fn: Callable[[str], None] | None
+) -> int | None:
+    """How many of the input photos actually made it into the reconstructed
+    model -- not the same as the point count (a handful of images can still
+    triangulate a few hundred points among just themselves while the rest of
+    the capture never registered). Read from images.txt's own header line
+    (verified directly from COLMAP's WriteImagesText source: "# Number of
+    images: N, mean observations per image: M") rather than scraping mapper's
+    console output, since multiple candidate reconstructions can be tried and
+    discarded internally before the one COLMAP keeps, so "Registering image"
+    log lines don't reliably reflect the final kept model.
+    """
+    with tempfile.TemporaryDirectory(dir=colmap_dir) as tmp_dir:
+        cmd = [
+            colmap_binary(), "model_converter",
+            "--input_path", str(model_dir),
+            "--output_path", tmp_dir,
+            "--output_type", "TXT",
+        ]
+        try:
+            _run_streaming(cmd, colmap_dir, lambda l: None, log_fn)
+        except ColmapError:
+            return None
+        images_txt = Path(tmp_dir) / "images.txt"
+        if not images_txt.exists():
+            return None
+        for line in images_txt.read_text().splitlines():
+            m = _NUM_IMAGES_RE.search(line)
+            if m:
+                return int(m.group(1))
     return None
 
 
@@ -252,6 +290,28 @@ def run_colmap_pipeline(
         )
     best_model = model_dirs[0]
     on_progress("sparse_reconstruction", 1.0, f"Sparse model reconstructed ({best_model.name}).")
+
+    registered = _count_registered_images(best_model, colmap_dir, log_fn)
+    # The point-count check in _mesh_from_sparse_cpu (>= 50 points) misses
+    # exactly this failure mode: a handful of images can still triangulate a
+    # few hundred points between just themselves while the rest of the
+    # capture never registered at all, producing a technically-valid but
+    # near-flat model from e.g. 2 of 34 photos (a real case that slipped
+    # through silently and needed to be diagnosed from the raw log by hand).
+    # Failing loudly here, before the expensive dense/OpenMVS passes run on
+    # data that can't produce anything good, turns that into an immediate,
+    # actionable error instead of a bad "done" scan.
+    if registered is not None and n_images > 0 and not (registered >= 5 and registered >= 0.3 * n_images):
+        raise ColmapError(
+            f"Only {registered} of your {n_images} photos could be matched into a single "
+            "3D model (see 'Could not register' lines in the log above). The rest never "
+            "found enough overlap with the others, so the result would be badly flattened "
+            "or wrong. This is almost always caused by too little real overlap between "
+            "consecutive shots -- most common with the 'Record' video capture (fast/uneven "
+            "rotation, motion blur) rather than Capture Shot / Auto-Capture. Retake the scan "
+            "rotating more slowly and evenly, with good lighting and significant overlap "
+            "between each view."
+        )
 
     gpu_available = os.environ.get("COLMAP_GPU", "0") == "1"
 
