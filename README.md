@@ -390,8 +390,12 @@ both miss real blur and occasionally flag a genuinely sharp but
 low-texture shot. Always glance at flagged thumbnails yourself.
 
 **The live object outline is background-subtraction, not object
-recognition.** It draws the convex hull of whatever's different from the
-background plate you captured, after erasing a disk around each detected
+recognition.** It traces the actual pixel-level silhouette of whatever's
+different from the background plate you captured (an 8-connected boundary
+walk, smoothed to remove staircase jitter), not a convex hull -- so a
+concave shape (a mug's handle gap, an L-shaped object) is drawn as its real
+outline rather than a bulged-out shape that bridges over the notch. This
+happens after erasing a disk around each detected
 hand landmark plus a corridor from the wrist toward the nearest frame edge
 (approximating the forearm, which MediaPipe doesn't track) so a held object
 doesn't just get lumped in with your hand/arm as one blob. Candidate regions

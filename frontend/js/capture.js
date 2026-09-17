@@ -256,11 +256,10 @@ import { GestureDetectorSystem } from "./gestures/detector.js";
     return (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
   }
 
-  // Andrew's monotone chain convex hull. This traces the outer boundary of
-  // whatever's different from the background plate -- for most household
-  // objects that's a good, robust approximation of their silhouette, and
-  // much simpler (and less bug-prone) to get right than pixel-level contour
-  // tracing with concave notches.
+  // Andrew's monotone chain convex hull. Kept as a fallback for degenerate
+  // components (too few points to trace a real boundary) -- see
+  // traceObjectShape below for why the outline no longer uses this as the
+  // primary shape.
   function convexHull(points) {
     if (points.length < 3) return points.slice();
     const pts = points.slice().sort((a, b) => (a.x === b.x ? a.y - b.y : a.x - b.x));
@@ -278,6 +277,81 @@ import { GestureDetectorSystem } from "./gestures/detector.js";
     lower.pop();
     upper.pop();
     return lower.concat(upper);
+  }
+
+  // 8-connected Moore-neighbor boundary tracing: walks the actual pixel-level
+  // silhouette of a component, clockwise, following its real outline
+  // (including concave notches -- a mug's handle gap, an L-shaped object)
+  // instead of bridging over them the way a convex hull does. `startX/startY`
+  // must be the topmost-then-leftmost pixel of the component, which
+  // guarantees the pixel just west of it is background -- that's what lets
+  // the walk start in a known-correct orientation.
+  const BOUNDARY_DIRS = [
+    [1, 0], [1, 1], [0, 1], [-1, 1],
+    [-1, 0], [-1, -1], [0, -1], [1, -1],
+  ]; // E, SE, S, SW, W, NW, N, NE -- clockwise
+  function traceBoundary(mask, gw, gh, startX, startY) {
+    const at = (x, y) => x >= 0 && y >= 0 && x < gw && y < gh && mask[y * gw + x];
+    const boundary = [{ x: startX, y: startY }];
+    let cx = startX, cy = startY;
+    let backtrackDir = 4; // the west neighbor of a row-major-scan start is always background
+    const maxSteps = gw * gh * 4;
+    for (let step = 0; step < maxSteps; step++) {
+      let found = -1;
+      for (let i = 1; i <= 8; i++) {
+        const dir = (backtrackDir + i) % 8;
+        const [dx, dy] = BOUNDARY_DIRS[dir];
+        if (at(cx + dx, cy + dy)) { found = dir; break; }
+      }
+      if (found === -1) break; // an isolated single pixel with no neighbors
+      const [dx, dy] = BOUNDARY_DIRS[found];
+      cx += dx; cy += dy;
+      backtrackDir = (found + 4) % 8;
+      if (cx === startX && cy === startY) break; // walked all the way back around
+      boundary.push({ x: cx, y: cy });
+    }
+    return boundary;
+  }
+
+  function perpendicularDistance(pt, a, b) {
+    const dx = b.x - a.x, dy = b.y - a.y;
+    const len = Math.hypot(dx, dy);
+    if (len === 0) return Math.hypot(pt.x - a.x, pt.y - a.y);
+    return Math.abs(dy * pt.x - dx * pt.y + b.x * a.y - b.y * a.x) / len;
+  }
+
+  // Ramer-Douglas-Peucker simplification: the raw pixel-boundary walk is a
+  // staircase (every grid-cell step is its own point), which looks noisy and
+  // jittery once scaled up to video resolution. This collapses runs of
+  // near-collinear points down to the corners that actually matter, without
+  // losing genuine concave detail the way a convex hull would.
+  function simplifyPolyline(points, epsilon) {
+    if (points.length < 3) return points;
+    let maxDist = 0, index = 0;
+    const a = points[0], b = points[points.length - 1];
+    for (let i = 1; i < points.length - 1; i++) {
+      const d = perpendicularDistance(points[i], a, b);
+      if (d > maxDist) { maxDist = d; index = i; }
+    }
+    if (maxDist > epsilon) {
+      const left = simplifyPolyline(points.slice(0, index + 1), epsilon);
+      const right = simplifyPolyline(points.slice(index), epsilon);
+      return left.slice(0, -1).concat(right);
+    }
+    return [a, b];
+  }
+
+  // Traces the actual silhouette of a component (concavities and all)
+  // instead of its convex hull, then smooths the pixel-staircase down to a
+  // clean polygon. Falls back to the convex hull only if the boundary walk
+  // can't produce a usable polygon (e.g. a near-single-pixel component).
+  function traceObjectShape(points, gw, gh) {
+    const mask = new Uint8Array(gw * gh);
+    for (const p of points) mask[p.y * gw + p.x] = 1;
+    const start = points.reduce((a, b) => (b.y < a.y || (b.y === a.y && b.x < a.x) ? b : a));
+    const boundary = traceBoundary(mask, gw, gh, start.x, start.y);
+    if (boundary.length < 3) return convexHull(points);
+    return simplifyPolyline(boundary, 0.75);
   }
 
   // Starts live hand tracking (reusing the same MediaPipe wrapper the
@@ -379,7 +453,7 @@ import { GestureDetectorSystem } from "./gestures/detector.js";
     if (component) {
       lastOutlineCentroid = centroidOf(component);
       lastOutlineSize = component.length / (OUTLINE_GRID_W * OUTLINE_GRID_H);
-      lastOutlineHull = convexHull(component);
+      lastOutlineHull = traceObjectShape(component, OUTLINE_GRID_W, OUTLINE_GRID_H);
       outlineLostStreak = 0;
     } else {
       // A momentary miss (a hand fully covering the object for a frame or
