@@ -51,10 +51,14 @@ brew install cmake boost eigen opencv@4 cgal ceres-solver nanoflann tinyxml2
 # OpenCVConfig.cmake by searching the keg -- rather than hardcoding a
 # lib/cmake/opencv4 style path -- avoids guessing Homebrew's exact install
 # layout, which has changed across OpenCV major versions before.
+# -L: brew --prefix returns /opt/homebrew/opt/opencv@4, itself a symlink into
+# the Cellar, so the search must follow it to see anything underneath.
 OPENCV4_PREFIX="$(brew --prefix opencv@4)"
-OPENCV4_CMAKE_DIR="$(dirname "$(find "$OPENCV4_PREFIX" -name OpenCVConfig.cmake | head -1)")"
+OPENCV4_CMAKE_DIR="$(dirname "$(find -L "$OPENCV4_PREFIX" -name OpenCVConfig.cmake 2>/dev/null | head -1)")"
 if [[ -z "$OPENCV4_CMAKE_DIR" || "$OPENCV4_CMAKE_DIR" == "." ]]; then
   echo "Couldn't locate OpenCVConfig.cmake under $OPENCV4_PREFIX -- opencv@4 may have changed its layout." >&2
+  echo "Here's every .cmake file actually under that prefix, to figure out the real path:" >&2
+  find -L "$OPENCV4_PREFIX" -name "*.cmake" 2>/dev/null >&2
   exit 1
 fi
 
