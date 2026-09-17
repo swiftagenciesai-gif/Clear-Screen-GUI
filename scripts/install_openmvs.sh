@@ -34,8 +34,29 @@ if ! command -v brew &>/dev/null; then
   exit 1
 fi
 
-echo "==> Installing build dependencies via Homebrew (boost, eigen, opencv, cgal, ceres-solver, nanoflann, tinyxml2)..."
-brew install cmake boost eigen opencv cgal ceres-solver nanoflann tinyxml2
+echo "==> Installing build dependencies via Homebrew (boost, eigen, opencv@4, cgal, ceres-solver, nanoflann, tinyxml2)..."
+# opencv@4, not plain opencv: OpenMVS's develop branch (libs/Common/Types.inl)
+# unconditionally defines cv::DataType<unsigned> and cv::DataType<uint64_t>
+# for any OpenCV major version > 2, on the assumption OpenCV itself never
+# defines those two -- true for OpenCV 3.x/4.x (verified directly against
+# OpenCV 4.14.0's traits.hpp, which has neither), but OpenCV 5.0.0 now
+# defines both itself, so building against plain `opencv` (currently v5 on
+# Homebrew) fails with "redefinition of DataType<...>". opencv@4 is a real,
+# actively-bottled Homebrew formula (keg-only, so it installs alongside any
+# existing plain `opencv` without conflict) that sidesteps this entirely.
+brew install cmake boost eigen opencv@4 cgal ceres-solver nanoflann tinyxml2
+
+# opencv@4 is keg-only (not symlinked into the normal Homebrew prefix), so
+# find_package(OpenCV) won't see it without an explicit hint. Locating its
+# OpenCVConfig.cmake by searching the keg -- rather than hardcoding a
+# lib/cmake/opencv4 style path -- avoids guessing Homebrew's exact install
+# layout, which has changed across OpenCV major versions before.
+OPENCV4_PREFIX="$(brew --prefix opencv@4)"
+OPENCV4_CMAKE_DIR="$(dirname "$(find "$OPENCV4_PREFIX" -name OpenCVConfig.cmake | head -1)")"
+if [[ -z "$OPENCV4_CMAKE_DIR" || "$OPENCV4_CMAKE_DIR" == "." ]]; then
+  echo "Couldn't locate OpenCVConfig.cmake under $OPENCV4_PREFIX -- opencv@4 may have changed its layout." >&2
+  exit 1
+fi
 
 WORK_DIR="${OPENMVS_WORK_DIR:-$HOME/openmvs_build}"
 mkdir -p "$WORK_DIR"
@@ -114,8 +135,17 @@ fi
 # halfmesh defines TINYGLTF_NO_STB_IMAGE/_WRITE itself (it bakes glTF textures
 # through OpenCV instead), so stb headers are never included and don't need
 # fetching -- confirmed by reading tiny_gltf.h's own include guards.
+# -DOpenCV_DIR pins this to the same opencv@4 build OpenMVS itself will use
+# below -- linking two different major OpenCV versions' static libs into one
+# final binary would be its own bug, separate from the DataType<> conflict.
+# Force a clean rebuild here: build_local_cmake_dep's normal skip-if-installed
+# check would otherwise keep an earlier run's halfmesh (built before the
+# opencv@4 pin existed, against whatever `opencv` happened to be linked)
+# instead of picking up -DOpenCV_DIR now.
+rm -rf "$LOCAL_PREFIX"/lib/cmake/halfmesh "$LOCAL_PREFIX"/lib/libhalfmesh.a "$LOCAL_PREFIX"/include/halfmesh "$WORK_DIR/halfmesh/build"
 build_local_cmake_dep "https://github.com/cdcseacave/halfmesh.git" "halfmesh" \
-  -DHALFMESH_BUILD_TESTS=OFF -DHALFMESH_BUILD_TOOLS=OFF -DHALFMESH_BUILD_PYTHON=OFF
+  -DHALFMESH_BUILD_TESTS=OFF -DHALFMESH_BUILD_TOOLS=OFF -DHALFMESH_BUILD_PYTHON=OFF \
+  -DOpenCV_DIR="$OPENCV4_CMAKE_DIR"
 
 if [[ ! -d openMVS ]]; then
   echo "==> Cloning OpenMVS..."
@@ -131,6 +161,7 @@ cmake ../openMVS \
   -DCMAKE_BUILD_TYPE=Release \
   -DVCG_ROOT="$WORK_DIR/vcglib" \
   -DCMAKE_PREFIX_PATH="$LOCAL_PREFIX" \
+  -DOpenCV_DIR="$OPENCV4_CMAKE_DIR" \
   -DOpenMVS_USE_CUDA=OFF \
   -DOpenMVS_USE_OPENMP=OFF \
   -DOpenMVS_BUILD_VIEWER=OFF \
