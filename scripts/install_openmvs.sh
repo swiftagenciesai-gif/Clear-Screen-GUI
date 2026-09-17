@@ -34,8 +34,8 @@ if ! command -v brew &>/dev/null; then
   exit 1
 fi
 
-echo "==> Installing build dependencies via Homebrew (boost, eigen, opencv, cgal, ceres-solver)..."
-brew install cmake boost eigen opencv cgal ceres-solver
+echo "==> Installing build dependencies via Homebrew (boost, eigen, opencv, cgal, ceres-solver, nanoflann)..."
+brew install cmake boost eigen opencv cgal ceres-solver nanoflann
 
 WORK_DIR="${OPENMVS_WORK_DIR:-$HOME/openmvs_build}"
 mkdir -p "$WORK_DIR"
