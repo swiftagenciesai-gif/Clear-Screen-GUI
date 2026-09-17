@@ -490,9 +490,17 @@ one fixed number that's either too twitchy on a noisy webcam or too
 insensitive on a clean one. Each live frame is then compared against that
 background in full color (a 3-channel distance, not grayscale luminance),
 since a same-*brightness*-different-*color* object is a real case a
-brightness-only diff would simply miss, and the result is cleaned up with a
-3x3 erode-then-dilate pass that wipes out isolated sensor-noise speckles
-before they can ever be mistaken for a separate small object. It then traces
+brightness-only diff would simply miss. Before thresholding, it also
+estimates and cancels out any global exposure/white-balance shift the
+camera's auto-adjustment introduced since the background was captured (the
+median per-cell color diff across the *entire* grid, which approximates that
+shift as long as the object covers a minority of the frame) -- without this,
+a webcam re-brightening the whole image the instant a hand or object enters
+frame reads as if the entire wall behind it "changed," which looked like the
+outline going haywire and tracing the room instead of the object. The result
+is then cleaned up with a 3x3 erode-then-dilate pass that wipes out isolated
+sensor-noise speckles before they can ever be mistaken for a separate small
+object. It then traces
 the actual pixel-level silhouette of whatever's left (an 8-connected
 boundary walk, smoothed to remove staircase jitter), not a convex hull -- so
 a concave shape (a mug's handle gap, an L-shaped object) is drawn as its

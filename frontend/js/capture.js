@@ -174,11 +174,41 @@ import { GestureDetectorSystem } from "./gestures/detector.js";
     return rgb;
   }
 
-  function colorGridDiff(curRGB, bgRGB, i) {
-    const dr = curRGB[i * 3] - bgRGB[i * 3];
-    const dg = curRGB[i * 3 + 1] - bgRGB[i * 3 + 1];
-    const db = curRGB[i * 3 + 2] - bgRGB[i * 3 + 2];
+  function colorGridDiff(curRGB, bgRGB, i, shift) {
+    const dr = curRGB[i * 3] - bgRGB[i * 3] - shift.r;
+    const dg = curRGB[i * 3 + 1] - bgRGB[i * 3 + 1] - shift.g;
+    const db = curRGB[i * 3 + 2] - bgRGB[i * 3 + 2] - shift.b;
     return Math.sqrt(dr * dr + dg * dg + db * db);
+  }
+
+  function median(values) {
+    const sorted = Array.from(values).sort((a, b) => a - b);
+    const mid = Math.floor(sorted.length / 2);
+    return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+  }
+
+  // Webcams continuously auto-adjust exposure/white-balance -- the instant a
+  // hand or object newly enters frame and changes the scene's average
+  // brightness, the camera commonly re-brightens (or re-tints) the *entire*
+  // image slightly in response, including the parts that didn't actually
+  // change. That's a real, systematic shift affecting nearly every pixel,
+  // not sensor noise -- no noise-adaptive threshold can absorb it, since
+  // it's far bigger than frame-to-frame noise but still shouldn't count as
+  // "the object." The median per-channel diff across the whole grid
+  // approximates that global shift (as long as the real object covers a
+  // minority of the frame, true for reasonable framing) and can be
+  // subtracted out before thresholding, telling a uniform exposure bump
+  // apart from an actual localized change.
+  function estimateGlobalShift(curRGB, bgRGB, cellCount) {
+    const dr = new Float32Array(cellCount);
+    const dg = new Float32Array(cellCount);
+    const db = new Float32Array(cellCount);
+    for (let i = 0; i < cellCount; i++) {
+      dr[i] = curRGB[i * 3] - bgRGB[i * 3];
+      dg[i] = curRGB[i * 3 + 1] - bgRGB[i * 3 + 1];
+      db[i] = curRGB[i * 3 + 2] - bgRGB[i * 3 + 2];
+    }
+    return { r: median(dr), g: median(dg), b: median(db) };
   }
 
   // Averaging several frames of the (static) background plate cancels out
@@ -197,10 +227,11 @@ import { GestureDetectorSystem } from "./gestures/detector.js";
     const mean = new Float32Array(cellCount * 3);
     for (const s of samples) for (let j = 0; j < mean.length; j++) mean[j] += s[j] / samples.length;
 
+    const zeroShift = { r: 0, g: 0, b: 0 };
     let distSum = 0, distCount = 0;
     for (let s = 1; s < samples.length; s++) {
       for (let i = 0; i < cellCount; i++) {
-        distSum += colorGridDiff(samples[s], samples[s - 1], i);
+        distSum += colorGridDiff(samples[s], samples[s - 1], i, zeroShift);
         distCount++;
       }
     }
@@ -533,9 +564,11 @@ import { GestureDetectorSystem } from "./gestures/detector.js";
       return;
     }
     const currentRGB = computeColorGrid(video);
-    let mask = new Uint8Array(OUTLINE_GRID_W * OUTLINE_GRID_H);
+    const cellCount = OUTLINE_GRID_W * OUTLINE_GRID_H;
+    const shift = estimateGlobalShift(currentRGB, backgroundColorGrid, cellCount);
+    let mask = new Uint8Array(cellCount);
     for (let i = 0; i < mask.length; i++) {
-      mask[i] = colorGridDiff(currentRGB, backgroundColorGrid, i) > outlineDiffThreshold ? 1 : 0;
+      mask[i] = colorGridDiff(currentRGB, backgroundColorGrid, i, shift) > outlineDiffThreshold ? 1 : 0;
     }
     // Clean up single/double-pixel sensor noise before it can ever reach
     // pickObjectComponent as its own spurious tiny "component".
