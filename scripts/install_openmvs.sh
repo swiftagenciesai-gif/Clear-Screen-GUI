@@ -88,28 +88,48 @@ fi
 # itself one of these local-only deps -- without it, halfmesh's own
 # find_package(tinyply CONFIG REQUIRED) wouldn't see the copy we just built.
 LOCAL_PREFIX="$WORK_DIR/local"
+# REF (3rd arg): a specific branch/commit to fetch instead of the repo's
+# default branch, for cases where OpenMVS needs a fork/commit that isn't
+# the project's own HEAD (see the PoseLib call below). Empty means "shallow
+# clone whatever the default branch is", as before.
 build_local_cmake_dep() {
-  local repo="$1" name="$2"; shift 2
+  local repo="$1" name="$2" ref="$3"; shift 3
   if [[ -f "$LOCAL_PREFIX/lib/cmake/$name/${name}Config.cmake" ]]; then
     return
   fi
   if [[ ! -d "$name" ]]; then
     echo "==> Cloning $name (an OpenMVS dependency with no Homebrew package)..."
-    git clone --depth 1 "$repo" "$name"
+    if [[ -n "$ref" ]]; then
+      mkdir -p "$name"
+      git -C "$name" init -q
+      git -C "$name" remote add origin "$repo"
+      git -C "$name" fetch --depth 1 origin "$ref"
+      git -C "$name" checkout -q FETCH_HEAD
+    else
+      git clone --depth 1 "$repo" "$name"
+    fi
   fi
   echo "==> Building and installing $name into $LOCAL_PREFIX..."
   cmake -S "$name" -B "$name/build" -DCMAKE_INSTALL_PREFIX="$LOCAL_PREFIX" -DCMAKE_PREFIX_PATH="$LOCAL_PREFIX" -DBUILD_SHARED_LIBS=OFF "$@"
   cmake --build "$name/build" --config Release
   cmake --install "$name/build"
 }
-build_local_cmake_dep "https://github.com/cdcseacave/TinyEXIF.git" "TinyEXIF"
-build_local_cmake_dep "https://github.com/cdcseacave/TinyNPY.git" "TinyNPY"
-# WERROR defaults ON upstream (treats every compiler warning as a build
-# failure) -- turned off since AppleClang 21 is newer than this library's
-# authors tested against, and a new pedantic warning shouldn't be allowed to
-# block an otherwise-working build.
-build_local_cmake_dep "https://github.com/PoseLib/PoseLib.git" "PoseLib" -DWERROR=OFF
-build_local_cmake_dep "https://github.com/ddiakopoulos/tinyply.git" "tinyply"
+build_local_cmake_dep "https://github.com/cdcseacave/TinyEXIF.git" "TinyEXIF" ""
+build_local_cmake_dep "https://github.com/cdcseacave/TinyNPY.git" "TinyNPY" ""
+# Upstream PoseLib/PoseLib (both its "master" branch and its latest tagged
+# release, v2.0.5 -- checked directly) has neither estimate_relative_pose_bearings
+# nor estimate_absolute_pose_bearings, which libs/SFM/PairsMatcher.cpp and
+# Resection.cpp call. OpenMVS actually needs cdcseacave's own PoseLib fork at
+# a specific commit on its feature/spherical-camera-support branch (which
+# does have both, with matching signatures) -- confirmed directly from
+# OpenMVS's own overlay vcpkg port (ports/poselib/portfile.cmake), not
+# guessed. WERROR defaults ON upstream (treats every compiler warning as a
+# build failure) -- turned off since AppleClang 21 is newer than this
+# library's authors tested against.
+rm -rf "$LOCAL_PREFIX"/lib/cmake/PoseLib "$LOCAL_PREFIX"/lib/libPoseLib.a "$LOCAL_PREFIX"/include/PoseLib "$WORK_DIR/PoseLib"
+build_local_cmake_dep "https://github.com/cdcseacave/PoseLib.git" "PoseLib" \
+  "ccdd2f62d7ee91b41a1dce4dfd619b688b6c247a" -DWERROR=OFF
+build_local_cmake_dep "https://github.com/ddiakopoulos/tinyply.git" "tinyply" ""
 
 # tinygltf and bshoshany-thread-pool (halfmesh's own dependencies, per its
 # vcpkg.json) are header-only with no CMake config at all -- even vcpkg just
@@ -147,7 +167,7 @@ fi
 # opencv@4 pin existed, against whatever `opencv` happened to be linked)
 # instead of picking up -DOpenCV_DIR now.
 rm -rf "$LOCAL_PREFIX"/lib/cmake/halfmesh "$LOCAL_PREFIX"/lib/libhalfmesh.a "$LOCAL_PREFIX"/include/halfmesh "$WORK_DIR/halfmesh/build"
-build_local_cmake_dep "https://github.com/cdcseacave/halfmesh.git" "halfmesh" \
+build_local_cmake_dep "https://github.com/cdcseacave/halfmesh.git" "halfmesh" "" \
   -DHALFMESH_BUILD_TESTS=OFF -DHALFMESH_BUILD_TOOLS=OFF -DHALFMESH_BUILD_PYTHON=OFF \
   -DOpenCV_DIR="$OPENCV4_CMAKE_DIR"
 
