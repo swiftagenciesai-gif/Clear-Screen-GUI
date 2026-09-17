@@ -180,9 +180,16 @@ def run_dense_pipeline(
     on_progress("stereo_fusion", 1.0, "Skipped -- OpenMVS densifies directly, no separate fusion step needed.")
     on_progress("meshing", 0.0, "Reconstructing the surface mesh from the dense point cloud...")
     t0 = time.time()
+    # --archive-type 2 (compressed binary): ReconstructMesh's own source only
+    # writes the companion _mesh.mvs scene file when the requested archive type
+    # differs from the scene's already-loaded format (verified directly from
+    # apps/ReconstructMesh/ReconstructMesh.cpp) -- since our input scene is
+    # already OpenMVS's default interface archive, it would otherwise skip
+    # writing the .mvs entirely and leave only a bare .ply, which we can't feed
+    # to TextureMesh.
     cmd = [
         binary("ReconstructMesh"), dense_mvs.name, "-w", str(dense_dir),
-        "--target-face-num", "150000",
+        "--target-face-num", "150000", "--archive-type", "2",
     ]
     _run(
         cmd, dense_dir, log,
@@ -200,7 +207,10 @@ def run_dense_pipeline(
     if refine:
         on_progress("meshing", 0.7, "Refining mesh geometry against the source photos (this can be slow)...")
         t0 = time.time()
-        cmd = [binary("RefineMesh"), mesh_mvs.name, "-w", str(dense_dir)]
+        # Same --archive-type fix as ReconstructMesh above: RefineMesh.cpp has
+        # the identical skip-the-.mvs-save condition when the archive type
+        # matches the already-loaded scene's format.
+        cmd = [binary("RefineMesh"), mesh_mvs.name, "-w", str(dense_dir), "--archive-type", "2"]
         try:
             _run(
                 cmd, dense_dir, log,
