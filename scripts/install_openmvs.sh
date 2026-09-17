@@ -46,16 +46,22 @@ if [[ ! -d vcglib ]]; then
   git clone --depth 1 https://github.com/cdcseacave/VCG.git vcglib
 fi
 
-# TinyEXIF, TinyNPY, and PoseLib (more OpenMVS dependencies with no Homebrew
-# package -- normally installed via vcpkg, which this script deliberately
-# avoids in favor of Homebrew) are real CMake packages, unlike VCG which
-# OpenMVS just points at as a raw source tree -- each has to actually be
-# built and installed so its <Name>Config.cmake exists somewhere OpenMVS's
-# own find_package() calls can see, hence the separate local install prefix
-# below. All three are REQUIRED in OpenMVS's SFM module (confirmed by
-# reading libs/SFM/CMakeLists.txt on OpenMVS's actual default branch,
-# "develop" -- not "master", which is a separate, less current branch that
-# doesn't even have this module).
+# TinyEXIF, TinyNPY, PoseLib, tinyply, and halfmesh (more OpenMVS dependencies
+# with no Homebrew package -- normally installed via vcpkg, which this script
+# deliberately avoids in favor of Homebrew) are real CMake packages, unlike
+# VCG which OpenMVS just points at as a raw source tree -- each has to
+# actually be built and installed so its <Name>Config.cmake exists somewhere
+# OpenMVS's own find_package() calls can see, hence the separate local
+# install prefix below. TinyEXIF/TinyNPY/PoseLib are REQUIRED in OpenMVS's
+# SFM module and tinyply/halfmesh in its MVS module (confirmed by reading
+# libs/SFM/CMakeLists.txt and libs/MVS/CMakeLists.txt on OpenMVS's actual
+# default branch, "develop" -- not "master", which is a separate, less
+# current branch that doesn't even have these modules).
+#
+# -DCMAKE_PREFIX_PATH is passed to every local dep's own configure step too
+# (not just OpenMVS's), because halfmesh below depends on tinyply, which is
+# itself one of these local-only deps -- without it, halfmesh's own
+# find_package(tinyply CONFIG REQUIRED) wouldn't see the copy we just built.
 LOCAL_PREFIX="$WORK_DIR/local"
 build_local_cmake_dep() {
   local repo="$1" name="$2"; shift 2
@@ -67,7 +73,7 @@ build_local_cmake_dep() {
     git clone --depth 1 "$repo" "$name"
   fi
   echo "==> Building and installing $name into $LOCAL_PREFIX..."
-  cmake -S "$name" -B "$name/build" -DCMAKE_INSTALL_PREFIX="$LOCAL_PREFIX" -DBUILD_SHARED_LIBS=OFF "$@"
+  cmake -S "$name" -B "$name/build" -DCMAKE_INSTALL_PREFIX="$LOCAL_PREFIX" -DCMAKE_PREFIX_PATH="$LOCAL_PREFIX" -DBUILD_SHARED_LIBS=OFF "$@"
   cmake --build "$name/build" --config Release
   cmake --install "$name/build"
 }
@@ -78,6 +84,38 @@ build_local_cmake_dep "https://github.com/cdcseacave/TinyNPY.git" "TinyNPY"
 # authors tested against, and a new pedantic warning shouldn't be allowed to
 # block an otherwise-working build.
 build_local_cmake_dep "https://github.com/PoseLib/PoseLib.git" "PoseLib" -DWERROR=OFF
+build_local_cmake_dep "https://github.com/ddiakopoulos/tinyply.git" "tinyply"
+
+# tinygltf and bshoshany-thread-pool (halfmesh's own dependencies, per its
+# vcpkg.json) are header-only with no CMake config at all -- even vcpkg just
+# copies their single headers onto the include path rather than building
+# anything. Dropping them straight into the same local include prefix lets
+# both halfmesh's and OpenMVS's own find_path() calls for them (OpenMVS's
+# libs/MVS/CMakeLists.txt does its own separate find_path for tiny_gltf.h)
+# succeed automatically, since CMAKE_PREFIX_PATH already covers this prefix.
+# json.hpp is nlohmann/json's single header, needed because tiny_gltf.h does
+# a plain #include "json.hpp" (verified straight from tinygltf's own source)
+# whenever TINYGLTF_USE_RAPIDJSON isn't defined -- halfmesh doesn't define
+# it, so this is required, not optional.
+mkdir -p "$LOCAL_PREFIX/include"
+if [[ ! -f "$LOCAL_PREFIX/include/tiny_gltf.h" ]]; then
+  echo "==> Fetching tinygltf's header (an OpenMVS/halfmesh dependency with no Homebrew package or CMake config)..."
+  curl -fsSL -o "$LOCAL_PREFIX/include/tiny_gltf.h" "https://raw.githubusercontent.com/syoyo/tinygltf/v3.0.0/tiny_gltf.h"
+fi
+if [[ ! -f "$LOCAL_PREFIX/include/json.hpp" ]]; then
+  echo "==> Fetching nlohmann/json's single header (needed by tinygltf's implementation)..."
+  curl -fsSL -o "$LOCAL_PREFIX/include/json.hpp" "https://raw.githubusercontent.com/nlohmann/json/v3.11.3/single_include/nlohmann/json.hpp"
+fi
+if [[ ! -f "$LOCAL_PREFIX/include/BS_thread_pool.hpp" ]]; then
+  echo "==> Fetching BS::thread_pool's header (an OpenMVS/halfmesh dependency with no Homebrew package or CMake config)..."
+  curl -fsSL -o "$LOCAL_PREFIX/include/BS_thread_pool.hpp" "https://raw.githubusercontent.com/bshoshany/thread-pool/v5.1.0/include/BS_thread_pool.hpp"
+fi
+
+# halfmesh defines TINYGLTF_NO_STB_IMAGE/_WRITE itself (it bakes glTF textures
+# through OpenCV instead), so stb headers are never included and don't need
+# fetching -- confirmed by reading tiny_gltf.h's own include guards.
+build_local_cmake_dep "https://github.com/cdcseacave/halfmesh.git" "halfmesh" \
+  -DHALFMESH_BUILD_TESTS=OFF -DHALFMESH_BUILD_TOOLS=OFF -DHALFMESH_BUILD_PYTHON=OFF
 
 if [[ ! -d openMVS ]]; then
   echo "==> Cloning OpenMVS..."
