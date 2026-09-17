@@ -17,15 +17,16 @@ SCANS_ROOT.mkdir(parents=True, exist_ok=True)
 # Kept in one place so the runner and the frontend progress bar agree on meaning.
 COLMAP_STEPS = [
     ("uploading", 0.03),
-    ("masking", 0.07),
-    ("feature_extraction", 0.15),
-    ("matching", 0.20),
-    ("sparse_reconstruction", 0.20),
-    ("undistortion", 0.05),
-    ("dense_stereo", 0.20),
-    ("stereo_fusion", 0.05),
-    ("meshing", 0.03),
-    ("mesh_export", 0.02),
+    ("masking", 0.05),
+    ("feature_extraction", 0.12),
+    ("matching", 0.13),
+    ("sparse_reconstruction", 0.15),
+    ("undistortion", 0.04),
+    ("dense_stereo", 0.17),  # GPU: patch_match_stereo. CPU+OpenMVS: InterfaceCOLMAP + DensifyPointCloud.
+    ("stereo_fusion", 0.04),  # GPU only -- OpenMVS densifies directly, no separate fusion step.
+    ("meshing", 0.10),  # GPU: poisson_mesher. CPU+OpenMVS: ReconstructMesh (+ optional RefineMesh). No GPU/OpenMVS: sparse-point Poisson.
+    ("texturing", 0.12),  # CPU+OpenMVS only: TextureMesh bakes real photo texture. Skipped otherwise.
+    ("mesh_export", 0.05),
 ]
 
 MESHROOM_STEPS = [

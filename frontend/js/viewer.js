@@ -130,16 +130,25 @@ async function boot() {
   function applyHolographicMaterial(root) {
     let meshCount = 0;
     let vertCount = 0;
+    let texturedCount = 0;
     root.traverse((obj) => {
       if (!obj.isMesh) return;
       meshCount++;
       vertCount += obj.geometry.attributes.position?.count || 0;
       const hasVertexColor = !!obj.geometry.attributes.color;
-      const mat = createHolographicMaterial({ hasVertexColor });
+      // A UV-textured mesh (OpenMVS's TextureMesh output, or Meshroom's)
+      // carries its real photo texture on the *original* material GLTFLoader
+      // built -- grab it before we replace that material with our
+      // holographic one, or the texture is lost and the model renders flat
+      // white/tinted instead of showing the actual scanned surface detail.
+      const originalMap = obj.material?.map || null;
+      const hasMap = !!(obj.geometry.attributes.uv && originalMap);
+      if (hasMap) texturedCount++;
+      const mat = createHolographicMaterial({ hasVertexColor, map: hasMap ? originalMap : null });
       obj.material = mat;
       holoMaterials.push(mat);
     });
-    debugLog(`applyHolographicMaterial: ${meshCount} mesh(es), ${vertCount} total vertices, hasVertexColor varies per-mesh`);
+    debugLog(`applyHolographicMaterial: ${meshCount} mesh(es), ${vertCount} total vertices, ${texturedCount} using a UV photo texture`);
   }
 
   function loadModel(url) {

@@ -16,25 +16,40 @@ import { LM, dist, handScale, fingerStates, centroid } from "./landmarks.js";
 const PINCH_ON_RATIO = 0.35; // thumb-index distance / hand-scale below this = pinching
 const PINCH_OFF_RATIO = 0.45; // hysteresis so it doesn't flicker at the boundary
 
-// Tracks short rolling history per hand slot so swipe/pan gestures can look
-// at recent motion instead of a single frame.
+// Tracks short rolling wrist-position history per hand so swipe/pan gestures
+// can look at recent motion instead of a single frame. Keyed by handedness
+// label, not array position -- MediaPipe's multiHandLandmarks/multiHandedness
+// arrays don't guarantee a stable index-to-physical-hand correspondence
+// across frames (their order can swap when hands cross or one briefly drops
+// out of detection), so indexing by position risked silently splicing one
+// hand's motion onto another's history mid-gesture, which would show up as
+// a spurious swipe firing or handPan suddenly jerking sideways.
 export class RollingHistory {
   constructor(maxLen = 12) {
     this.maxLen = maxLen;
-    this.perHand = [[], []]; // wrist positions for up to 2 hands, oldest first
+    this.byHand = new Map(); // handedness label -> [{x,y,t}], oldest first
   }
 
   push(hands) {
-    for (let i = 0; i < 2; i++) {
-      const h = hands[i];
-      const buf = this.perHand[i];
-      if (h) {
-        buf.push({ ...h.landmarks[LM.WRIST], t: performance.now() });
-        if (buf.length > this.maxLen) buf.shift();
-      } else if (buf.length) {
-        buf.length = 0; // hand left the frame; don't let stale history leak into a new gesture
+    const seen = new Set();
+    for (const h of hands) {
+      const key = h.handedness || "Unknown";
+      seen.add(key);
+      let buf = this.byHand.get(key);
+      if (!buf) {
+        buf = [];
+        this.byHand.set(key, buf);
       }
+      buf.push({ ...h.landmarks[LM.WRIST], t: performance.now() });
+      if (buf.length > this.maxLen) buf.shift();
     }
+    for (const key of this.byHand.keys()) {
+      if (!seen.has(key)) this.byHand.delete(key); // hand left the frame; don't let stale history leak into a new gesture
+    }
+  }
+
+  forHandedness(label) {
+    return this.byHand.get(label) || [];
   }
 }
 
@@ -107,7 +122,9 @@ export function registerDefaultGestures(registry) {
   const SWIPE_MAX_MS = 500;
 
   function detectSwipe(ctx, direction) {
-    const buf = ctx.history.perHand[0];
+    const hand = firstHand(ctx);
+    if (!hand) return null;
+    const buf = ctx.history.forHandedness(hand.handedness);
     if (buf.length < 4) return null;
     const first = buf[0];
     const last = buf[buf.length - 1];
@@ -153,8 +170,9 @@ export function registerDefaultGestures(registry) {
     "handPan",
     (ctx) => {
       const hand = firstHand(ctx);
-      const buf = ctx.history.perHand[0];
-      if (!hand || buf.length < 2) return { active: false, data: {} };
+      if (!hand) return { active: false, data: {} };
+      const buf = ctx.history.forHandedness(hand.handedness);
+      if (buf.length < 2) return { active: false, data: {} };
       const lm = hand.landmarks;
       const pinchRatio = dist(lm[LM.THUMB_TIP], lm[LM.INDEX_TIP]) / handScale(lm);
       if (pinchRatio < PINCH_ON_RATIO) return { active: false, data: {} }; // let pinch own this motion instead

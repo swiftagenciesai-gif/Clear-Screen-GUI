@@ -1,11 +1,21 @@
-"""Cleans up a raw photogrammetry mesh (COLMAP's meshed-poisson.ply or
-Meshroom's texturedMesh.obj) and exports it as a web-ready .glb.
+"""Cleans up a raw photogrammetry mesh (COLMAP's meshed-poisson.ply, OpenMVS's
+UV-textured .obj, or Meshroom's texturedMesh.obj) and exports it as a
+web-ready .glb.
 
-Poisson reconstruction extrapolates a watertight surface from a point cloud,
-which reliably produces some floating debris/blobby extensions in areas with
-sparse or noisy points (typically the object's underside, where a turntable
-rig can't see). We trim those with a connected-component filter, then
-decimate so the file is a reasonable size for a browser three.js viewer.
+Poisson reconstruction (COLMAP's own, or the CPU sparse-point fallback's)
+extrapolates a watertight surface from a point cloud, which reliably
+produces some floating debris/blobby extensions in areas with sparse or
+noisy points (typically the object's underside, where a turntable rig can't
+see). We trim those with a connected-component filter, then decimate so the
+file is a reasonable size for a browser three.js viewer.
+
+A UV-textured mesh (OpenMVS's ReconstructMesh/TextureMesh output, or
+Meshroom's) doesn't have that failure mode -- its Delaunay-based
+reconstruction doesn't extrapolate into empty space the way Poisson does --
+and its size was already controlled at generation time (--target-face-num
+for OpenMVS), so it skips the trim/decimate steps entirely: simplifying a
+textured mesh here risks desyncing its UV coordinates from the decimated
+geometry, which would show up as scrambled/smeared texture in the viewer.
 """
 from __future__ import annotations
 
@@ -81,15 +91,16 @@ def mesh_to_glb(
     mesh.update_faces(mesh.unique_faces())
     mesh.remove_unreferenced_vertices()
 
-    mesh = _keep_largest_components(mesh)
+    if mesh.visual.kind != "texture":
+        mesh = _keep_largest_components(mesh)
 
-    if fill_holes:
-        try:
-            trimesh.repair.fill_holes(mesh)
-        except Exception:
-            pass  # cosmetic only; a few open boundaries are fine for a viewer mesh
+        if fill_holes:
+            try:
+                trimesh.repair.fill_holes(mesh)
+            except Exception:
+                pass  # cosmetic only; a few open boundaries are fine for a viewer mesh
 
-    mesh = _decimate(mesh, target_faces)
+        mesh = _decimate(mesh, target_faces)
 
     # Recenter and normalize scale so the object lands predictably in the
     # three.js scene regardless of COLMAP's arbitrary reconstruction units.

@@ -1,14 +1,28 @@
-"""Drives the real COLMAP CLI through a full sparse+dense reconstruction and
-hands off a colored mesh for export. Every stage is a genuine COLMAP
-structure-from-motion / multi-view-stereo step -- there is no shortcut or
-"fake" mesh generation here. See https://colmap.github.io/cli.html for the
-full option reference these calls use.
+"""Drives the real COLMAP CLI through structure-from-motion (feature
+extraction, matching, sparse reconstruction), then one of three dense/mesh
+paths depending on what's actually available on this machine, in order of
+quality:
 
-Progress is reported by parsing the (fairly predictable) progress lines
-COLMAP prints to stdout, e.g. "Matching block [1/6, 1/6]" and
-"Processed file [12/48]". If COLMAP's own output changes across versions and
-a regex stops matching, we still advance the step's progress bar on a slow
-timer so the UI never looks frozen -- it just won't be as granular.
+  1. COLMAP's own dense multi-view stereo (patch_match_stereo) + Poisson
+     mesher, when a CUDA GPU is available.
+  2. OpenMVS's dense reconstruction + mesh + photo-texturing (CPU-only,
+     optional install), when there's no GPU but OpenMVS is present. See
+     openmvs_pipeline.py.
+  3. A CPU-only mesh built directly from the sparse point cloud (no dense
+     stereo at all), as the last-resort fallback -- lower detail, but
+     requires no additional installs.
+
+Every stage is a genuine reconstruction step -- there is no shortcut or
+"fake" mesh generation anywhere in this file. See
+https://colmap.github.io/cli.html for the full COLMAP option reference these
+calls use.
+
+Progress for the COLMAP steps is reported by parsing the (fairly
+predictable) progress lines COLMAP prints to stdout, e.g. "Matching block
+[1/6, 1/6]" and "Processed file [12/48]". If COLMAP's own output changes
+across versions and a regex stops matching, we still advance the step's
+progress bar on a slow timer so the UI never looks frozen -- it just won't
+be as granular.
 """
 from __future__ import annotations
 
@@ -19,6 +33,8 @@ import subprocess
 import time
 from pathlib import Path
 from typing import Callable
+
+from . import openmvs_pipeline
 
 ProgressCB = Callable[[str, float, str], None]  # step, fraction (0-1), message
 
@@ -103,7 +119,7 @@ def run_colmap_pipeline(
     scan_dir: Path,
     on_progress: ProgressCB,
     log_fn: Callable[[str], None] | None = None,
-    matcher: str = "sequential",
+    matcher: str = "auto",
     camera_model: str = "OPENCV",
     single_camera: bool = True,
     dense_max_image_size: int = 2000,
@@ -166,11 +182,32 @@ def run_colmap_pipeline(
     on_progress("feature_extraction", 1.0, "Feature extraction complete.")
 
     # --- 2. Matching -------------------------------------------------------------
-    on_progress("matching", 0.0, f"Matching features across photos ({matcher})...")
+    resolved_matcher = matcher
+    if matcher == "auto":
+        # Sequential matching only compares each photo to its near neighbors
+        # in capture order -- faster, and it avoids spurious matches between
+        # views that can't actually overlap (e.g. the front and back of the
+        # object). That's a good trade when GPU dense multi-view stereo is
+        # about to do the real heavy lifting regardless of small sparse-model
+        # imperfections. But on the CPU-only path the *sparse* point cloud
+        # (or OpenMVS's dense cloud built from those same camera poses) IS
+        # the geometry that determines the final mesh -- there's no dense
+        # stereo pass to smooth over drift. Sequential matching's default
+        # overlap window never compares the last few turntable shots back
+        # against the first few, so a full 360-degree rotation never gets
+        # its loop closed and error accumulates uncorrected all the way
+        # around the object. Exhaustive matching compares every pair
+        # (including that wrap-around), and COLMAP's own geometric
+        # verification (RANSAC two-view estimation) already discards
+        # genuinely non-overlapping pairs -- so this doesn't reintroduce the
+        # spurious-match problem, and a turntable capture set (tens of
+        # images) is still fast to match exhaustively on CPU.
+        resolved_matcher = "sequential" if gpu_requested else "exhaustive"
+    on_progress("matching", 0.0, f"Matching features across photos ({resolved_matcher})...")
     matcher_cmd_name = {
         "exhaustive": "exhaustive_matcher",
         "sequential": "sequential_matcher",
-    }.get(matcher, "exhaustive_matcher")
+    }.get(resolved_matcher, "exhaustive_matcher")
     cmd = [
         colmap_binary(), matcher_cmd_name,
         "--database_path", str(db_path),
@@ -218,21 +255,53 @@ def run_colmap_pipeline(
 
     gpu_available = os.environ.get("COLMAP_GPU", "0") == "1"
 
+    def _undistort():
+        on_progress("undistortion", 0.1, "Undistorting images for dense reconstruction...")
+        cmd = [
+            colmap_binary(), "image_undistorter",
+            "--image_path", str(images_dir),
+            "--input_path", str(best_model),
+            "--output_path", str(dense_dir),
+            "--output_type", "COLMAP",
+            "--max_image_size", str(dense_max_image_size),
+        ]
+        _run_streaming(cmd, colmap_dir, lambda l: None, log_fn)
+        on_progress("undistortion", 1.0, "Undistortion complete.")
+
     if not gpu_available:
         # COLMAP's dense multi-view stereo (patch_match_stereo) has no CPU
         # code path at all -- it hard-requires an NVIDIA CUDA GPU, which no
-        # Mac has and most laptops don't either. Rather than run the
-        # undistortion step just to fail on the GPU-only step right after
-        # it, skip straight to a CPU-only mesh built directly from the
-        # sparse point cloud (see _mesh_from_sparse_cpu). It's lower detail
-        # than real dense MVS, but it's a genuine reconstruction from your
-        # photos and needs no additional installs (Meshroom is not a viable
-        # substitute here either -- AliceVision does not publish official
-        # macOS builds of it at all).
-        for skipped_step in ("undistortion", "dense_stereo", "stereo_fusion"):
+        # Mac has and most laptops don't either. OpenMVS's dense
+        # reconstruction (DensifyPointCloud) runs the equivalent step on CPU
+        # instead, plus mesh reconstruction and real photo-texturing -- a
+        # substantial quality upgrade over meshing directly from the sparse
+        # point cloud. It's an optional install (see README /
+        # scripts/install_openmvs.sh); if it's not present, or it fails for
+        # any reason, fall back to the sparse-only CPU mesh rather than
+        # failing the whole scan.
+        if openmvs_pipeline.is_available():
+            try:
+                _undistort()
+                meshed_path = openmvs_pipeline.run_dense_pipeline(
+                    dense_dir, on_progress, log_fn,
+                    refine=os.environ.get("OPENMVS_REFINE", "0") == "1",
+                )
+                return meshed_path
+            except Exception as exc:  # noqa: BLE001 - any OpenMVS failure should fall back, not abort the scan
+                if log_fn:
+                    log_fn(f"OpenMVS dense pipeline failed ({exc}); falling back to sparse-only CPU reconstruction.\n")
+        else:
+            if log_fn:
+                log_fn(
+                    "OpenMVS not installed -- using the lower-detail sparse-point mesh. "
+                    "See README for how to install OpenMVS for much higher mesh quality "
+                    "(scripts/install_openmvs.sh).\n"
+                )
+
+        for skipped_step in ("undistortion", "dense_stereo", "stereo_fusion", "texturing"):
             on_progress(
                 skipped_step, 1.0,
-                "Skipped: no CUDA GPU available (set COLMAP_GPU=1 if you have one). "
+                "Skipped: no CUDA GPU and OpenMVS unavailable/failed. "
                 "Meshing directly from the sparse point cloud instead.",
             )
         on_progress("meshing", 0.1, "Estimating normals and running CPU Poisson reconstruction on sparse points...")
@@ -241,17 +310,7 @@ def run_colmap_pipeline(
         return meshed_path
 
     # --- 4. Undistortion (prepares images for dense MVS) -------------------------
-    on_progress("undistortion", 0.1, "Undistorting images for dense stereo...")
-    cmd = [
-        colmap_binary(), "image_undistorter",
-        "--image_path", str(images_dir),
-        "--input_path", str(best_model),
-        "--output_path", str(dense_dir),
-        "--output_type", "COLMAP",
-        "--max_image_size", str(dense_max_image_size),
-    ]
-    _run_streaming(cmd, colmap_dir, lambda l: None, log_fn)
-    on_progress("undistortion", 1.0, "Undistortion complete.")
+    _undistort()
 
     # --- 5. Dense stereo (patch match) -------------------------------------------
     on_progress("dense_stereo", 0.0, "Computing dense depth maps (this is the slowest step)...")
@@ -302,6 +361,11 @@ def run_colmap_pipeline(
     if not meshed_path.exists():
         raise ColmapError("Poisson mesher did not produce a mesh.")
     on_progress("meshing", 1.0, "Mesh reconstructed.")
+    on_progress(
+        "texturing", 1.0,
+        "Skipped -- COLMAP's Poisson mesher colors vertices directly rather than baking a "
+        "UV texture map. Install OpenMVS for real photo-textured output.",
+    )
 
     return meshed_path
 

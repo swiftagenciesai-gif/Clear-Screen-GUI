@@ -6,9 +6,11 @@ install commands for whatever is missing. Run this first:
 """
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
+from pathlib import Path
 
 OK = "\033[92mOK\033[0m"
 MISSING = "\033[91mMISSING\033[0m"
@@ -31,6 +33,21 @@ def check(name: str, cmd: list[str], version_hint: str = "") -> bool:
         return False
 
 
+def check_openmvs() -> bool:
+    bin_dir = os.environ.get("OPENMVS_BIN_DIR")
+
+    def resolve(name: str) -> str:
+        return str(Path(bin_dir) / name) if bin_dir else name
+
+    names = ["InterfaceCOLMAP", "DensifyPointCloud", "ReconstructMesh", "TextureMesh"]
+    missing = [n for n in names if not shutil.which(resolve(n))]
+    if missing:
+        print(f"  [{WARN}] OpenMVS (optional, much better mesh quality on CPU) -- missing: {', '.join(missing)}")
+        return False
+    print(f"  [{OK}] OpenMVS (optional CPU dense reconstruction + texturing)")
+    return True
+
+
 def main() -> int:
     print("Python:")
     print(f"  [{OK if sys.version_info >= (3, 10) else WARN}] {sys.version.splitlines()[0]}")
@@ -42,6 +59,9 @@ def main() -> int:
     print("\nPhotogrammetry engine (need at least one):")
     have_colmap = check("COLMAP", ["colmap", "-h"])
     have_meshroom = check("Meshroom (meshroom_batch)", ["meshroom_batch", "--help"])
+
+    print("\nOptional CPU dense reconstruction (big mesh-quality upgrade when there's no GPU):")
+    have_openmvs = check_openmvs()
 
     print("\nPython packages (backend/requirements.txt):")
     pkgs_ok = True
@@ -80,6 +100,14 @@ def main() -> int:
     else:
         engine = "COLMAP" if have_colmap else "Meshroom"
         print(f"Photogrammetry engine ready: {engine}")
+
+    if have_colmap and not have_openmvs:
+        print(
+            "\nOpenMVS not found -- on a machine with no CUDA GPU (i.e. any Mac), COLMAP scans\n"
+            "will use a lower-detail sparse-point mesh instead of real dense reconstruction.\n"
+            "Optional upgrade (CPU-only, no GPU needed): bash scripts/install_openmvs.sh\n"
+            "(builds from source, ~20-60 min; see README for details)."
+        )
 
     if not pkgs_ok:
         print("\nInstall missing Python packages with:")

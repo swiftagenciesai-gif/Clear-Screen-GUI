@@ -15,13 +15,16 @@ import { GestureDetectorSystem } from "./gestures/detector.js";
   // app currently sees as "the object", well before any photo is taken.
   const OUTLINE_GRID_W = 120;
   const OUTLINE_GRID_H = 68;
-  const OUTLINE_DIFF_THRESHOLD = 25;
+  const OUTLINE_MIN_THRESHOLD = 12; // floor: never so sensitive that camera sensor noise alone trips it
+  const OUTLINE_MAX_THRESHOLD = 45; // ceiling: never so insensitive it stops reacting to a real object
+  const OUTLINE_THRESHOLD_MULTIPLIER = 4; // threshold = clamp(measured background noise stddev * this)
+  const OUTLINE_BG_SAMPLE_FRAMES = 8; // frames averaged (and used to measure noise) when capturing the background plate
   const OUTLINE_MIN_COMPONENT_FRACTION = 0.01; // ignore blobs smaller than 1% of the grid as noise
   const OUTLINE_LOCK_GRACE_FRAMES = 20; // ~0.3-0.6s of missed detections before a lock is considered truly lost
 
   const COLMAP_STEPS = [
     "masking", "feature_extraction", "matching", "sparse_reconstruction",
-    "undistortion", "dense_stereo", "stereo_fusion", "meshing", "mesh_export",
+    "undistortion", "dense_stereo", "stereo_fusion", "meshing", "texturing", "mesh_export",
   ];
   const MESHROOM_STEPS = ["masking", "meshroom_batch", "mesh_export"];
 
@@ -32,7 +35,8 @@ import { GestureDetectorSystem } from "./gestures/detector.js";
 
   let stream = null;
   let backgroundBlob = null;
-  let backgroundGrayGrid = null; // Float32Array, OUTLINE_GRID_W x OUTLINE_GRID_H, set once background is captured
+  let backgroundColorGrid = null; // Float32Array, (OUTLINE_GRID_W x OUTLINE_GRID_H) * 3 (RGB), set once background is captured
+  let outlineDiffThreshold = OUTLINE_MIN_THRESHOLD; // adapted to measured background noise when the background is captured
   let shots = []; // { blob, sharpness, blurry }
   let autoTimer = null;
   let scanId = null;
@@ -152,14 +156,104 @@ import { GestureDetectorSystem } from "./gestures/detector.js";
   outlineGridCanvas.height = OUTLINE_GRID_H;
   const outlineGridCtx = outlineGridCanvas.getContext("2d", { willReadFrequently: true });
 
-  function computeGrayGrid(source) {
+  // Stores R,G,B per grid cell rather than collapsing to grayscale luminance
+  // first -- a diff based only on brightness misses an object that's a
+  // similar *brightness* to the background but a different *color* (a
+  // fairly common real case: a pastel object against a similarly-lit wall),
+  // since luminance is a weighted brightness average that two different
+  // hues can easily land on the same value for.
+  function computeColorGrid(source) {
     outlineGridCtx.drawImage(source, 0, 0, OUTLINE_GRID_W, OUTLINE_GRID_H);
     const { data } = outlineGridCtx.getImageData(0, 0, OUTLINE_GRID_W, OUTLINE_GRID_H);
-    const gray = new Float32Array(OUTLINE_GRID_W * OUTLINE_GRID_H);
-    for (let i = 0; i < gray.length; i++) {
-      gray[i] = 0.299 * data[i * 4] + 0.587 * data[i * 4 + 1] + 0.114 * data[i * 4 + 2];
+    const rgb = new Float32Array(OUTLINE_GRID_W * OUTLINE_GRID_H * 3);
+    for (let i = 0, j = 0; i < data.length; i += 4, j += 3) {
+      rgb[j] = data[i];
+      rgb[j + 1] = data[i + 1];
+      rgb[j + 2] = data[i + 2];
     }
-    return gray;
+    return rgb;
+  }
+
+  function colorGridDiff(curRGB, bgRGB, i) {
+    const dr = curRGB[i * 3] - bgRGB[i * 3];
+    const dg = curRGB[i * 3 + 1] - bgRGB[i * 3 + 1];
+    const db = curRGB[i * 3 + 2] - bgRGB[i * 3 + 2];
+    return Math.sqrt(dr * dr + dg * dg + db * db);
+  }
+
+  // Averaging several frames of the (static) background plate cancels out
+  // per-frame sensor noise that a single snapshot would bake in permanently
+  // -- and while sampling, measuring how much consecutive frames actually
+  // differ gives a real, camera-specific noise level to calibrate the
+  // detection threshold against, instead of one fixed constant that's
+  // either too twitchy on a noisy webcam or too insensitive on a clean one.
+  async function sampleBackgroundColorGrid(frameCount) {
+    const cellCount = OUTLINE_GRID_W * OUTLINE_GRID_H;
+    const samples = [];
+    for (let i = 0; i < frameCount; i++) {
+      samples.push(computeColorGrid(video));
+      if (i < frameCount - 1) await new Promise((res) => requestAnimationFrame(res));
+    }
+    const mean = new Float32Array(cellCount * 3);
+    for (const s of samples) for (let j = 0; j < mean.length; j++) mean[j] += s[j] / samples.length;
+
+    let distSum = 0, distCount = 0;
+    for (let s = 1; s < samples.length; s++) {
+      for (let i = 0; i < cellCount; i++) {
+        distSum += colorGridDiff(samples[s], samples[s - 1], i);
+        distCount++;
+      }
+    }
+    const noiseLevel = distCount ? distSum / distCount : 0;
+    return { colorGrid: mean, noiseLevel };
+  }
+
+  // 3x3 erode-then-dilate ("opening"): erosion drops any foreground pixel
+  // that isn't surrounded on all sides by other foreground pixels, which
+  // wipes out isolated single/double-pixel sensor-noise speckles entirely;
+  // the following dilation then restores the surviving (real, solid) blob
+  // back to close to its original size. Cheap enough on a 120x68 grid to
+  // run every frame, and removes exactly the kind of noise that used to
+  // spawn tiny spurious "components" for pickObjectComponent to have to
+  // filter out by size.
+  function erode(mask, gw, gh) {
+    const out = new Uint8Array(gw * gh);
+    for (let y = 0; y < gh; y++) {
+      for (let x = 0; x < gw; x++) {
+        const i = y * gw + x;
+        if (!mask[i]) continue;
+        let allFg = true;
+        for (let dy = -1; dy <= 1 && allFg; dy++) {
+          for (let dx = -1; dx <= 1; dx++) {
+            const nx = x + dx, ny = y + dy;
+            if (nx < 0 || ny < 0 || nx >= gw || ny >= gh) continue;
+            if (!mask[ny * gw + nx]) { allFg = false; break; }
+          }
+        }
+        out[i] = allFg ? 1 : 0;
+      }
+    }
+    return out;
+  }
+  function dilate(mask, gw, gh) {
+    const out = new Uint8Array(gw * gh);
+    for (let y = 0; y < gh; y++) {
+      for (let x = 0; x < gw; x++) {
+        let anyFg = false;
+        for (let dy = -1; dy <= 1 && !anyFg; dy++) {
+          for (let dx = -1; dx <= 1; dx++) {
+            const nx = x + dx, ny = y + dy;
+            if (nx < 0 || ny < 0 || nx >= gw || ny >= gh) continue;
+            if (mask[ny * gw + nx]) { anyFg = true; break; }
+          }
+        }
+        out[y * gw + x] = anyFg ? 1 : 0;
+      }
+    }
+    return out;
+  }
+  function morphOpen(mask, gw, gh) {
+    return dilate(erode(mask, gw, gh), gw, gh);
   }
 
   // 4-connected flood fill returning every connected foreground component
@@ -431,18 +525,21 @@ import { GestureDetectorSystem } from "./gestures/detector.js";
   // Recomputes the live outline from the current video frame. Cheap enough
   // (a 120x68 grid) to call every animation frame.
   function updateObjectOutline() {
-    if (!backgroundGrayGrid || video.readyState < 2) {
+    if (!backgroundColorGrid || video.readyState < 2) {
       lastOutlineHull = null;
       lastOutlineCentroid = null;
       lastOutlineSize = null;
       outlineLostStreak = 0;
       return;
     }
-    const currentGray = computeGrayGrid(video);
-    const mask = new Uint8Array(OUTLINE_GRID_W * OUTLINE_GRID_H);
+    const currentRGB = computeColorGrid(video);
+    let mask = new Uint8Array(OUTLINE_GRID_W * OUTLINE_GRID_H);
     for (let i = 0; i < mask.length; i++) {
-      mask[i] = Math.abs(currentGray[i] - backgroundGrayGrid[i]) > OUTLINE_DIFF_THRESHOLD ? 1 : 0;
+      mask[i] = colorGridDiff(currentRGB, backgroundColorGrid, i) > outlineDiffThreshold ? 1 : 0;
     }
+    // Clean up single/double-pixel sensor noise before it can ever reach
+    // pickObjectComponent as its own spurious tiny "component".
+    mask = morphOpen(mask, OUTLINE_GRID_W, OUTLINE_GRID_H);
     if (latestHandLandmarks.length) excludeHandsFromMask(mask, OUTLINE_GRID_W, OUTLINE_GRID_H);
     // Only ever the single object component -- "one thing at a time" --
     // picked by size plus temporal continuity with the last frame's lock
@@ -513,7 +610,13 @@ import { GestureDetectorSystem } from "./gestures/detector.js";
   $("btn-capture-bg").addEventListener("click", async () => {
     const canvas = grabFrameCanvas();
     backgroundBlob = await canvasToBlob(canvas);
-    backgroundGrayGrid = computeGrayGrid(video);
+    $("bg-status").textContent = "Measuring background (hold still for a moment)...";
+    const { colorGrid, noiseLevel } = await sampleBackgroundColorGrid(OUTLINE_BG_SAMPLE_FRAMES);
+    backgroundColorGrid = colorGrid;
+    outlineDiffThreshold = Math.max(
+      OUTLINE_MIN_THRESHOLD,
+      Math.min(OUTLINE_MAX_THRESHOLD, noiseLevel * OUTLINE_THRESHOLD_MULTIPLIER)
+    );
     $("bg-status").textContent = "Background captured ✓ -- live object outline is now active below.";
     $("capture-panel").style.display = "block";
     $("deg-per-shot").textContent = Math.round(360 / TARGET_SHOTS);

@@ -91,9 +91,50 @@ containing `meshroom_batch` to your PATH.
 On macOS without a CUDA GPU (i.e. every Mac), just use COLMAP -- this app
 automatically falls back to a CPU-only sparse-point-cloud mesh when dense
 stereo isn't available (see "Real limitations" below for what that means
-for quality).
+for quality), unless you also install OpenMVS (next section), which fixes
+that gap without needing a GPU at all.
 
 Re-run `python3 scripts/check_deps.py` until it reports everything ready.
+
+### Optional: OpenMVS, for real dense reconstruction without a GPU
+
+COLMAP's own dense multi-view stereo (`patch_match_stereo`) hard-requires a
+CUDA GPU -- there's no CPU code path for it at all, which is why the CPU-only
+fallback above meshes directly from the *sparse* point cloud (a few thousand
+feature points) instead. [OpenMVS](https://github.com/cdcseacave/openMVS)
+does the equivalent dense-reconstruction step on CPU instead, then builds a
+proper surface mesh from that dense cloud and bakes your actual photos onto
+it as a real texture map -- a substantial jump in both geometric detail and
+visual quality over per-vertex-colored Poisson output, still without a GPU.
+
+It's entirely optional and auto-detected: if it's installed, new scans use it
+automatically; if not, the app works exactly as before. There's no Homebrew
+formula for it, so it has to be built from source:
+
+```bash
+bash scripts/install_openmvs.sh
+```
+
+This installs OpenMVS's build dependencies via Homebrew (Boost, Eigen,
+OpenCV, CGAL, Ceres), clones OpenMVS and its VCG library dependency, and
+builds it with CUDA and OpenMP both explicitly disabled (no Mac has a CUDA
+GPU, and Apple's default clang has no OpenMP support without extra setup).
+Expect 20-60 minutes depending on your machine -- it's a real from-source
+build of a fairly large C++ project, with the usual small chance of needing
+manual troubleshooting for your specific Xcode/library versions. If it
+fails, the app is completely unaffected; it just keeps using the sparse-only
+fallback.
+
+When it finishes, the script prints an `export OPENMVS_BIN_DIR=...` line --
+add that to your shell profile, open a new terminal, and re-run
+`python3 scripts/check_deps.py` to confirm it's detected. No other
+configuration is needed; `colmap_pipeline.py` checks for OpenMVS
+automatically on every scan that has no GPU available.
+
+If you'd also like it to refine mesh geometry against the source photos
+after the initial reconstruction (slower, and can meaningfully improve
+surface detail on smooth/curved objects), set `OPENMVS_REFINE=1` before
+starting the backend.
 
 ---
 
@@ -187,7 +228,11 @@ Opens your webcam again, floats the loaded model semi-transparently over the
 live feed (a "holographic" look via a custom rim-glow/scanline shader, not a
 solid object on a black background), and tracks your hands in real time.
 A small skeleton overlay confirms what the camera sees; a badge at the
-bottom of the screen confirms which gesture was just recognized.
+bottom of the screen confirms which gesture was just recognized. The
+holographic shader shows a model's real photo texture when it has one
+(OpenMVS's output) and its per-vertex color otherwise (COLMAP/Meshroom's
+Poisson-based output) -- both feed through the same rim-glow/scanline
+treatment.
 
 Default gestures (all defined in one config object -- see "Extending
 gestures" below):
@@ -220,7 +265,8 @@ backend/
   pipeline/
     jobs.py               Per-scan status.json (progress, logs, state machine)
     masks.py               Background-subtraction masking (OpenCV)
-    colmap_pipeline.py     Drives the COLMAP CLI end-to-end
+    colmap_pipeline.py     Drives the COLMAP CLI end-to-end (SfM, then GPU/OpenMVS/sparse dense path)
+    openmvs_pipeline.py    Optional CPU dense reconstruction + photo-texturing via OpenMVS
     meshroom_pipeline.py   Drives `meshroom_batch` as a fallback engine
     mesh_export.py         Cleans up + decimates + exports mesh -> .glb (trimesh/Open3D)
     runner.py              Orchestrates: pick engine -> mask -> reconstruct -> export
@@ -244,24 +290,58 @@ scripts/
 
 ### The COLMAP pipeline (what actually runs)
 
-`colmap_pipeline.py` drives, in order: `feature_extractor` -> matcher
-(`sequential_matcher` by default, since the capture UI's photos are already
-in turntable rotation order -- this is both faster and more accurate than
-exhaustive pairwise matching, which wastes time on non-overlapping pairs)
--> `mapper` (incremental sparse
-reconstruction / SfM) -> `image_undistorter` -> `patch_match_stereo` (dense
-depth maps) -> `stereo_fusion` (colored dense point cloud) ->
-`poisson_mesher`. `mesh_export.py` then trims small disconnected debris
-(a known Poisson artifact), optionally fills small holes, decimates to a
-target face count, recenters/rescales, and exports `.glb` via trimesh. Every
-step is genuine COLMAP SfM/MVS -- nothing here is a lower-fidelity
-shortcut.
+`colmap_pipeline.py` always drives `feature_extractor` -> matcher ->
+`mapper` (incremental sparse reconstruction / SfM) first. The matcher choice
+is now automatic and depends on whether GPU dense stereo is about to run
+afterwards:
+- **With a CUDA GPU** (`COLMAP_GPU=1`): `sequential_matcher`, since the
+  capture UI's photos are already in turntable rotation order and dense
+  stereo will do the real heavy lifting regardless of small sparse-model
+  imperfections -- faster, and avoids wasting time on genuinely
+  non-overlapping pairs (front vs. back of the object).
+- **Without a GPU** (the default on every Mac): `exhaustive_matcher`
+  instead. On this path the sparse (or OpenMVS-densified) point cloud *is*
+  the final geometry, with no dense-stereo pass to smooth over drift --
+  and `sequential_matcher`'s default overlap window never compares the
+  last few turntable shots back against the first few, so a full
+  360-degree rotation never gets its loop closed. Exhaustive matching
+  compares every pair including that wrap-around; COLMAP's own geometric
+  verification (RANSAC) already discards pairs that don't actually
+  overlap, so this doesn't reintroduce spurious matches, and a turntable
+  set (tens of images) is still fast to match exhaustively on CPU.
 
-Progress is reported by parsing COLMAP's own stdout progress lines
-(`[i/n]`, `Registering image #i`, `Processing view i/n`); if a future COLMAP
-version changes that output format, the pipeline still runs correctly, it
-just falls back to per-step start/end progress instead of granular
-percentages.
+From the sparse model, one of three paths produces the mesh, in order of
+preference -- see "Real limitations" below for what each actually looks
+like:
+1. **CUDA GPU available**: `image_undistorter` -> `patch_match_stereo`
+   (dense depth maps) -> `stereo_fusion` (colored dense point cloud) ->
+   `poisson_mesher`.
+2. **No GPU, OpenMVS installed**: `image_undistorter` -> OpenMVS's
+   `InterfaceCOLMAP` -> `DensifyPointCloud` (CPU dense stereo) ->
+   `ReconstructMesh` -> `TextureMesh` (real photo texture). See
+   `openmvs_pipeline.py`.
+3. **Neither**: mesh directly from the sparse point cloud via Open3D
+   Poisson reconstruction (`_mesh_from_sparse_cpu` in `colmap_pipeline.py`).
+
+`mesh_export.py` then cleans up the result before exporting `.glb` via
+trimesh: for a per-vertex-colored mesh (paths 1 and 3), it trims small
+disconnected debris (a known Poisson artifact), optionally fills small
+holes, decimates to a target face count, then recenters/rescales. A
+UV-textured mesh (path 2) skips the trim/decimate steps -- its size was
+already controlled by OpenMVS's `--target-face-num` at generation time, and
+simplifying it here would risk desyncing its texture coordinates from the
+decimated geometry -- but still gets recentered/rescaled. Every step in all
+three paths is a genuine reconstruction step -- nothing here is a
+lower-fidelity shortcut or placeholder shape.
+
+Progress for the COLMAP steps is reported by parsing COLMAP's own stdout
+progress lines (`[i/n]`, `Registering image #i`, `Processing view i/n`); if
+a future COLMAP version changes that output format, the pipeline still runs
+correctly, it just falls back to per-step start/end progress instead of
+granular percentages. OpenMVS's steps use a time-based progress estimate
+instead (an exponential curve that never claims 100% until the step
+actually finishes) since we haven't verified its stdout format is stable
+enough to parse the same way.
 
 ### Extending gestures
 
@@ -326,25 +406,36 @@ the first place -- building it from source is its own project). Concretely:
 - If you *do* have a working CUDA-enabled COLMAP build, set `COLMAP_GPU=1`
   before starting the backend to use it and get real dense multi-view
   stereo (millions of points, fine surface detail).
-- **Without that**, this app automatically falls back to building the mesh
-  directly from COLMAP's *sparse* point cloud (Poisson surface
-  reconstruction via Open3D, entirely CPU-based, no extra installs). This
-  is a real reconstruction from your photos, but a much rougher one --
-  typically hundreds to a few thousand points instead of millions, so
-  expect a blobby overall shape that captures the object's rough form, not
-  fine surface texture or detail. There is no way to get COLMAP- or
-  Meshroom-quality dense detail without a CUDA GPU; a cloud GPU instance or
-  a paid hosted photogrammetry API are the only ways around that, and
-  neither is set up here.
+- **Without that**, this app checks for [OpenMVS](#optional-openmvs-for-real-dense-reconstruction-without-a-gpu)
+  next -- a genuinely dense, CPU-only reconstruction + real photo-texturing
+  path (see the setup section above for why this is a much better default
+  than it sounds: OpenMVS's dense stereo is CPU-native, not a CUDA feature
+  running in a slow compatibility mode). Install it once with
+  `bash scripts/install_openmvs.sh` and every future scan benefits
+  automatically, no GPU needed.
+- **Without OpenMVS either** (the true last resort), this app falls back to
+  building the mesh directly from COLMAP's *sparse* point cloud (Poisson
+  surface reconstruction via Open3D, entirely CPU-based, no extra installs
+  at all). This is a real reconstruction from your photos, but a much
+  rougher one -- typically hundreds to a few thousand points instead of the
+  hundreds of thousands OpenMVS or CUDA dense stereo produce, so expect a
+  blobby overall shape that captures the object's rough form, not fine
+  surface texture or detail. A cloud GPU instance or a paid hosted
+  photogrammetry API are the only ways to get *more* detail than OpenMVS's
+  CPU path, and neither is set up here.
 
-**Processing time.** Even the CPU sparse-fallback path completes in
-seconds to a couple minutes. The full CUDA dense pipeline (feature
+**Processing time.** The CPU sparse-fallback path (no GPU, no OpenMVS)
+completes in seconds to a couple minutes -- it's fast because it's not doing
+dense reconstruction at all. The full CUDA dense pipeline (feature
 extraction -> matching -> SfM -> dense stereo -> meshing) on a 30-50 photo
 scan commonly takes **5-30+ minutes**, with dense stereo
-(`patch_match_stereo`) as the slowest step by far. There is no way around
-that being slow when it does run -- real multi-view stereo is
-computationally heavy, and the progress UI is there so it's honest about
-that rather than making it look broken.
+(`patch_match_stereo`) as the slowest step by far. OpenMVS's CPU dense path
+lands in a similar range to the CUDA pipeline or somewhat slower depending
+on your machine -- `DensifyPointCloud` is real multi-view stereo running on
+CPU instead of GPU, so it's genuinely doing that much work, not skipping it.
+There is no way around dense reconstruction being slow when it runs -- the
+progress UI is there so it's honest about that rather than making it look
+broken.
 
 **Lighting and background requirements.** COLMAP needs sharp, well-textured,
 consistently-lit photos with genuine overlap between consecutive views.
@@ -390,12 +481,23 @@ both miss real blur and occasionally flag a genuinely sharp but
 low-texture shot. Always glance at flagged thumbnails yourself.
 
 **The live object outline is background-subtraction, not object
-recognition.** It traces the actual pixel-level silhouette of whatever's
-different from the background plate you captured (an 8-connected boundary
-walk, smoothed to remove staircase jitter), not a convex hull -- so a
-concave shape (a mug's handle gap, an L-shaped object) is drawn as its real
-outline rather than a bulged-out shape that bridges over the notch. This
-happens after erasing a disk around each detected
+recognition.** When you capture the background plate, it samples 8 frames
+and averages them (canceling out per-frame sensor noise a single snapshot
+would bake in) while measuring how much those frames actually differ from
+each other frame-to-frame -- that measured noise level sets the detection
+threshold for the rest of the session (clamped to a sane range), rather than
+one fixed number that's either too twitchy on a noisy webcam or too
+insensitive on a clean one. Each live frame is then compared against that
+background in full color (a 3-channel distance, not grayscale luminance),
+since a same-*brightness*-different-*color* object is a real case a
+brightness-only diff would simply miss, and the result is cleaned up with a
+3x3 erode-then-dilate pass that wipes out isolated sensor-noise speckles
+before they can ever be mistaken for a separate small object. It then traces
+the actual pixel-level silhouette of whatever's left (an 8-connected
+boundary walk, smoothed to remove staircase jitter), not a convex hull -- so
+a concave shape (a mug's handle gap, an L-shaped object) is drawn as its
+real outline rather than a bulged-out shape that bridges over the notch.
+This all happens after erasing a disk around each detected
 hand landmark plus a corridor from the wrist toward the nearest frame edge
 (approximating the forearm, which MediaPipe doesn't track) so a held object
 doesn't just get lumped in with your hand/arm as one blob. Candidate regions
