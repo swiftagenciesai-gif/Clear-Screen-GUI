@@ -156,6 +156,31 @@ if [[ ! -d openMVS ]]; then
   git clone --depth 1 https://github.com/cdcseacave/openMVS.git
 fi
 
+# Homebrew's libheif formula (an OpenMVS/libs/IO dependency, pulled in via
+# pkg-config -- not installed by this script directly, but present already if
+# libheif is on the machine) builds TWICE: once normally (a shared dylib whose
+# own transitive codec deps are resolved automatically at load time), and once
+# again as a second, separate static-only build whose libheif.a is dropped
+# into the exact same lib/ directory purely for consumers who want static
+# linking (verified straight from the formula's own `install` method). Static
+# archives never bundle their dependencies, so that .a alone is missing
+# aom/libde265/x265/webp's symbols.
+#
+# OpenMVS's own build (libs/IO/CMakeLists.txt's pkg_check_modules_fullpath_libs
+# macro) always prefers a co-located static archive over the resolved dylib
+# when one exists, which is exactly this case -- so it silently picks the
+# incomplete .a and fails at link time with "undefined symbols" for those
+# codecs. Rather than patch OpenMVS's vendored source (fragile against
+# re-clones) or touch Homebrew's installed files, this links libheif's own
+# real dependencies (confirmed directly from libheif's Homebrew formula)
+# explicitly alongside it.
+brew install aom libde265 x265 webp
+HEIF_CODEC_LINKER_FLAGS=""
+for codec_pkg in aom libde265 x265 webp; do
+  HEIF_CODEC_LINKER_FLAGS="$HEIF_CODEC_LINKER_FLAGS -L$(brew --prefix "$codec_pkg")/lib"
+done
+HEIF_CODEC_LINKER_FLAGS="$HEIF_CODEC_LINKER_FLAGS -laom -lde265 -lx265 -lsharpyuv"
+
 mkdir -p openMVS_build
 cd openMVS_build
 
@@ -166,6 +191,7 @@ cmake ../openMVS \
   -DVCG_ROOT="$WORK_DIR/vcglib" \
   -DCMAKE_PREFIX_PATH="$LOCAL_PREFIX" \
   -DOpenCV_DIR="$OPENCV4_CMAKE_DIR" \
+  -DCMAKE_SHARED_LINKER_FLAGS="$HEIF_CODEC_LINKER_FLAGS" \
   -DOpenMVS_USE_CUDA=OFF \
   -DOpenMVS_USE_OPENMP=OFF \
   -DOpenMVS_BUILD_VIEWER=OFF \
