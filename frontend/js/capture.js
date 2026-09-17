@@ -32,6 +32,22 @@ import { GestureDetectorSystem } from "./gestures/detector.js";
   const HEIGHT_PROMPT_EVERY = 6; // remind roughly every 1/6 of the target shots
   const HEIGHT_PROMPT_PAUSE_MS = 4000;
 
+  // A camera positioned far from a small object gives consecutive turntable
+  // shots almost identical viewpoints despite the object visibly rotating --
+  // plenty of SIFT matches, but too little real parallax to triangulate,
+  // which is a confirmed real-world failure mode (COLMAP registered 2 of 40
+  // photos on a scan shot this way) that produces no warning of its own
+  // until the whole reconstruction fails. lastOutlineSize is the detected
+  // object's fraction of the frame's area; below ~1/16 corresponds to the
+  // object's linear size being under roughly 1/4 of the frame, which is the
+  // threshold that was confirmed to fail. Hysteresis (show below
+  // FRAMING_MIN, only hide once back above FRAMING_OK) plus a frame streak
+  // requirement on both transitions keeps this from flickering as the
+  // measurement jitters near the boundary.
+  const FRAMING_MIN_SIZE_FRACTION = 0.06;
+  const FRAMING_OK_SIZE_FRACTION = 0.10;
+  const FRAMING_STREAK_FRAMES = 20;
+
   const COLMAP_STEPS = [
     "masking", "feature_extraction", "matching", "sparse_reconstruction",
     "undistortion", "dense_stereo", "stereo_fusion", "meshing", "texturing", "mesh_export",
@@ -58,6 +74,9 @@ import { GestureDetectorSystem } from "./gestures/detector.js";
   let latestHandLandmarks = []; // most recent frame's hands, each a 21-point landmark array in raw (unmirrored) video-normalized coords
   let handDetectorStarted = false;
   let heightPromptActive = false;
+  let framingSmallStreak = 0;
+  let framingOkStreak = 0;
+  let framingPromptShown = false;
 
   // ---------- Camera setup ----------------------------------------------------
 
@@ -635,6 +654,37 @@ import { GestureDetectorSystem } from "./gestures/detector.js";
     octx.restore();
   }
 
+  // Warns when the detected object is consistently too small in frame to
+  // give turntable rotation enough real parallax for SfM -- see
+  // FRAMING_MIN_SIZE_FRACTION above for why. Only judges frames where an
+  // object was actually detected; says nothing when the outline is lost
+  // entirely (a different problem, already visible as "no outline shown").
+  function checkFraming() {
+    const framingEl = $("framing-prompt");
+    if (lastOutlineSize == null) {
+      framingSmallStreak = 0;
+      framingOkStreak = 0;
+      return;
+    }
+    if (lastOutlineSize < FRAMING_MIN_SIZE_FRACTION) {
+      framingSmallStreak++;
+      framingOkStreak = 0;
+    } else if (lastOutlineSize >= FRAMING_OK_SIZE_FRACTION) {
+      framingOkStreak++;
+      framingSmallStreak = 0;
+    }
+    if (!framingPromptShown && framingSmallStreak >= FRAMING_STREAK_FRAMES) {
+      framingPromptShown = true;
+      framingEl.textContent = "\u{1F50D} Object looks small in frame -- move the camera closer or zoom in. " +
+        "A distant camera gives every turntable shot nearly the same viewpoint, which isn't enough " +
+        "parallax for a real 3D reconstruction.";
+      framingEl.style.display = "block";
+    } else if (framingPromptShown && framingOkStreak >= FRAMING_STREAK_FRAMES) {
+      framingPromptShown = false;
+      framingEl.style.display = "none";
+    }
+  }
+
   // Continuous render loop for the overlay: live object outline underneath,
   // coverage ring on top, running the whole time the camera is on rather
   // than only redrawing on specific button clicks.
@@ -642,6 +692,7 @@ import { GestureDetectorSystem } from "./gestures/detector.js";
     if (overlay.width && overlay.height) {
       octx.clearRect(0, 0, overlay.width, overlay.height);
       updateObjectOutline();
+      checkFraming();
       drawObjectOutline();
       drawCoverageRingOnly();
     }
